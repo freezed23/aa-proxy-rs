@@ -1,3 +1,12 @@
+## 2026-10-31 기기 적용 주의 — 1.2.0 바이너리와 v1.1.0 rootfs의 USB 충돌 (Claude)
+
+- **현재 기기 실행 파일:** `aaw1/v1.1.0-5ghz@fc461e836e6f31028d1c131a82f14448295ee987`(메인 탭 키프레임 토글 포함, 소유자 벤치 성공). 포크 `main`(1.2.0)에는 이 토글(`maybe_request_real_video_keyframe`)이 **없다**. `main`을 빌드해 올리면 메인 탭 첫 화면이 다시 ~1분 걸린다.
+- **USB 구조 변경:** 업스트림 1.2.0은 `f_accessory` + `umtprd` 대신 **FunctionFS** 가젯(`usb-gadget` crate, `src/usb_functionfs.rs`)을 쓴다. 업스트림 buildroot는 `5ecb92b`에서 `S92usb_gadget`·umtprd를 제거했다. 현재 기기는 **v1.1.0 rootfs**라 부팅 시 `/etc/init.d/S92usb_gadget`가 예전 가젯(accessory + ffs.mtp/umtprd)을 먼저 UDC에 묶는다 → 1.2.0 바이너리만 교체하면 UDC를 두고 충돌할 수 있다.
+- **확인된 것:** 기기 커널 `grep functionfs /proc/filesystems` → `nodev functionfs`(소유자 확인). 1.2.0 바이너리를 기기에서 실행한 기록은 **없다**.
+- **소유자 결정(10/30):** 1.2.0은 바이너리만 교체하지 않고, **v1.2.0 공식 이미지가 나오면 이미지째 재설치**한다. 재설치 후 hostapd 템플릿(TKIP/HT40+) 반영 여부 확인, `config.toml`(`band`/`channel`/MITM)·`inject-displays.toml`·pem 재적용.
+- **그래도 바이너리만 올려야 한다면(미검증 절차):** 바이너리 백업 → `S92usb_gadget`를 `/data/`로 이동 → configfs만 마운트하는 작은 init 스크립트(`mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config`) 추가 → 교체·재부팅 → 로그 `USB Manager: using UDC`, umtprd 미실행 확인. 되돌리기는 바이너리와 `S92usb_gadget` 복원.
+- `[AA BUILD]`로 빌드할 소스가 지정되지 않으면 위 차이를 소유자에게 확인한다(현재 기기 대응 = `fc461e8`, 1.2.0 = 토글 미포함·이미지 재설치 전제).
+
 ## 2026-10-30 원격 AA 실행 — 구현 병합 및 환경 preflight PASS
 
 기존 수동 전용/TODO 정책은 소유자의 새 원격화 요청으로 대체됐다.
