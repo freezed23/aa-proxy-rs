@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1.7-labs
+#
+# AAWireless 1 CS317 (Rockchip RV1109, Cortex-A7, 32-bit) binary-only build.
+# Target rootfs: aa-proxy buildroot aaw1-cs317 (Bootlin armv7-eabihf glibc, OpenSSL 3).
+#
+# Note: upstream Dockerfile.armv7.binary actually targets aarch64 and will not
+# run on AAW1. This file targets armv7-unknown-linux-gnueabihf with the same
+# cargo features buildroot uses (io-uring off, wasm-scripting on).
+#
+# Usage (WSL2 with Docker):
+#   DOCKER_BUILDKIT=1 docker build -f Dockerfile.aaw1 --target export \
+#     --output type=local,dest=./output .
+# Result: ./output/aa-proxy-rs
+
+FROM rust:bookworm AS builder
+
+RUN dpkg --add-architecture armhf && apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    pkg-config \
+    gcc-arm-linux-gnueabihf \
+    g++-arm-linux-gnueabihf \
+    libc6-dev-armhf-cross \
+    libssl-dev:armhf \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add armv7-unknown-linux-gnueabihf
+
+ARG AA_PROXY_COMMIT=aaw1-local
+ENV PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH=/usr/lib/arm-linux-gnueabihf/pkgconfig \
+    CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
+    CC_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-gcc \
+    CXX_armv7_unknown_linux_gnueabihf=arm-linux-gnueabihf-g++ \
+    AA_PROXY_BOARD=aaw1-cs317 \
+    AA_PROXY_COMMIT=${AA_PROXY_COMMIT}
+
+WORKDIR /src
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    --mount=type=cache,target=/src/target \
+    cargo build --release --target armv7-unknown-linux-gnueabihf \
+      --no-default-features --features wasm-scripting --bin aa-proxy-rs && \
+    mkdir -p /out && \
+    cp target/armv7-unknown-linux-gnueabihf/release/aa-proxy-rs /out/aa-proxy-rs
+
+FROM scratch AS export
+COPY --from=builder /out/aa-proxy-rs /aa-proxy-rs
