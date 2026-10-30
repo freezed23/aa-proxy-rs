@@ -19,7 +19,7 @@
 ## 2. 실행 환경/산출물 (현재 **수동**)
 
 - 현행 실행 방식: 소유자 PC의 **WSL2 Linux + Docker (Linux 컨테이너)**. GitHub Actions 워크플로는 이 포크에서 확인되지 않았다. `khud-pc-01`가 포크 저장소의 러너로 등록되어 있는지는 **미확인**이다. 따라서 지금 "원격으로 AA 빌드" 가능한 시스템이 설정되었다고 표현하지 않는다.
-- 실제 스크립트: [`tools/aaw1/build.sh`](../aaw1/build.sh). 내부에서 `Dockerfile.aaw1`을 사용해 `armv7-unknown-linux-gnueabihf` 타깃, `--no-default-features --features wasm-scripting`로 빌드하며 `io-uring`을 제외한다. 이것은 **RV1109 32비트 CS317**용이지 ARM64나 KHUD ESP32 이미지가 아니다.
+- 실제 스크립트: [`tools/aaw1/build.sh`](./build.sh). 내부에서 `Dockerfile.aaw1`을 사용해 `armv7-unknown-linux-gnueabihf` 타깃, `--no-default-features --features wasm-scripting`로 빌드하며 `io-uring`을 제외한다. 이것은 **RV1109 32비트 CS317**용이지 ARM64나 KHUD ESP32 이미지가 아니다.
 - 실행 예시 (**아래는 향후 명시적인 빌드 요청 때만 수행**):
 
 ```sh
@@ -79,7 +79,7 @@ tail -50 /var/log/aa-proxy-rs.log
 
 - 신규 바이너리의 정수 주파수 파서만으로 기존 `config.toml`의 `band = "2.4"` / `channel = 6`을 자동으로 고치는 것은 아니다. 또한 `aa-proxy/buildroot`의 AAW 공통 `hostapd.conf.in`에 남아 있는 `TKIP`·`[HT40+]`가 CS317 AP를 막을 수 있다.
 - 소유자 벤치에서는 **장치 내** 설정을 `band="5"`, `channel=36`, CCMP, `wmm_enabled=1`로 수정하고 HT40+를 제외해 기본 hostapd 경로가 올라왔으며, 임시 `S91hostapd5g` 우회는 비활성화했다. **새 이미지/업데이트 후에는 파일 상태와 복귀 여부를 재검증**해야 한다.
-- 관련 근거: KHUD [`docs/KHUD_AAW1_AAPROXY_RS_BENCH_20261030.md`](https://github.com/freezed23/khud/blob/main/docs/KHUD_AAW1_AAPROXY_RS_BENCH_20261030.md) `10 및 [`tools/aaw1/UPSTREAM_ISSUE_hostapd_template.md`](./UPSTREAM_ISSUE_hostapd_template.md). 업스트림 이슈는 **초안, 미제출**.
+- 관련 근거: KHUD [`docs/KHUD_AAW1_AAPROXY_RS_BENCH_20261030.md`](https://github.com/freezed23/khud/blob/main/docs/KHUD_AAW1_AAPROXY_RS_BENCH_20261030.md) §10 및 [`tools/aaw1/UPSTREAM_ISSUE_hostapd_template.md`](./UPSTREAM_ISSUE_hostapd_template.md). 업스트림 이슈는 **초안, 미제출**.
 
 ## 4. 향후 원격 빌드 가능 조건 (현재 **TODO**, 구현 금지)
 
