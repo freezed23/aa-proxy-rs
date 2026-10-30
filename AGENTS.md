@@ -1,0 +1,3 @@
+# AAProxy AI entrypoint
+
+Read tools/aaw1/BUILD_HANDOFF.md first. An explicit AA build request targets this repository's AAWireless 1 CS317 ARMv7 binary. Remote execution uses the separate AA Owner Build in private freezed23/khud, owner issue [AA BUILD] with body build <full-AA-source-SHA>. It must never invoke KHUD Owner Build or compile APK/ESP32. Inspect owner-selected source and refs; no silent old-branch substitution. Setup diagnostics use preflight. Verify run/comment, source SHA, ELF, NAS SHA256 and optional Telegram status separately. Builds are only on explicit owner request; no automatic device deployment. Preserve secrets outside Git.
