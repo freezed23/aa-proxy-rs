@@ -631,6 +631,14 @@ pub struct AppConfig {
     /// Default false keeps injected streams idle until a tap client connects.
     #[serde(default)]
     pub inject_force_focus_without_tap: bool,
+    /// When a media tap client connects to a real (HU-advertised) video channel
+    /// such as video-main, send the phone an unsolicited VIDEO_FOCUS_NOTIFICATION
+    /// native→projected toggle so it emits a fresh IDR right away, instead of the
+    /// client waiting for the phone's next natural keyframe (~60 s observed).
+    /// Same mechanism already used for injected displays. The real HU may see a
+    /// stream restart (fresh IDR) on that channel.
+    #[serde(default = "default_true")]
+    pub media_tap_main_keyframe_toggle: bool,
     pub change_usb_order: bool,
     pub stop_on_disconnect: bool,
     pub waze_lht_workaround: bool,
@@ -1059,6 +1067,7 @@ impl Default for AppConfig {
             inject_aux_touch_width: 1280,
             inject_aux_touch_height: 720,
             inject_force_focus_without_tap: false,
+            media_tap_main_keyframe_toggle: true,
             change_usb_order: false,
             stop_on_disconnect: false,
             waze_lht_workaround: false,
@@ -1411,6 +1420,7 @@ impl AppConfig {
         doc["inject_aux_touch_width"] = value(self.inject_aux_touch_width as i64);
         doc["inject_aux_touch_height"] = value(self.inject_aux_touch_height as i64);
         doc["inject_force_focus_without_tap"] = value(self.inject_force_focus_without_tap);
+        doc["media_tap_main_keyframe_toggle"] = value(self.media_tap_main_keyframe_toggle);
         doc["change_usb_order"] = value(self.change_usb_order);
         doc["stop_on_disconnect"] = value(self.stop_on_disconnect);
         doc["waze_lht_workaround"] = value(self.waze_lht_workaround);

@@ -433,6 +433,106 @@ fn ensure_map_album_art_h264_virtual_tap(
     }
 }
 
+/// On a fresh media tap client for a real (HU-advertised) video channel such as
+/// video-main, ask the phone for a new IDR by sending an unsolicited
+/// VIDEO_FOCUS_NOTIFICATION native→projected toggle -- the same toggle used for
+/// injected displays on tap connect. Without it the tap waits for the phone's
+/// next natural keyframe, which on the main channel was observed at ~65 s.
+///
+/// The first sighting of a channel (new session) only records the current
+/// connect generation: a session start already produces an IDR by itself.
+fn maybe_request_real_video_keyframe(
+    proxy_type: ProxyType,
+    ctx: &mut ModifyContext,
+    cfg: &AppConfig,
+    tx: &Sender<Packet>,
+) -> Result<()> {
+    if proxy_type != ProxyType::HeadUnit
+        || !cfg.media_tap_main_keyframe_toggle
+        || ctx.real_video_channels.is_empty()
+    {
+        return Ok(());
+    }
+
+    let mut toggle_channels: Vec<(u8, DisplayType)> = Vec::new();
+    for (&channel, &display_type) in &ctx.real_video_channels {
+        let Some(sink) = ctx.media_channels.get(&channel) else {
+            continue;
+        };
+        let connect_gen = sink.client_connect_generation();
+        let has_tap_client = sink.has_subscribers();
+        match ctx.real_video_connect_gen.insert(channel, connect_gen) {
+            None => {}
+            Some(seen) if connect_gen > seen && has_tap_client => {
+                toggle_channels.push((channel, display_type));
+            }
+            Some(_) => {}
+        }
+    }
+
+    for (channel, display_type) in toggle_channels {
+        // Send both halves or neither: a lone NATIVE would leave the phone
+        // thinking the HU took the main display away.
+        if tx.capacity() < 2 {
+            warn!(
+                "{} <yellow>media tap keyframe request:</> queue busy on channel <b>{:#04x}</>; skipped",
+                get_name(proxy_type),
+                channel
+            );
+            continue;
+        }
+        let flags = ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST;
+        let mut native_pkt = Packet {
+            channel,
+            flags,
+            final_length: None,
+            payload: Vec::new(),
+        };
+        rewrite_video_focus_notification(
+            &mut native_pkt,
+            VideoFocusMode::VIDEO_FOCUS_NATIVE,
+            true,
+        )?;
+        let mut projected_pkt = Packet {
+            channel,
+            flags,
+            final_length: None,
+            payload: Vec::new(),
+        };
+        rewrite_video_focus_notification(
+            &mut projected_pkt,
+            VideoFocusMode::VIDEO_FOCUS_PROJECTED,
+            true,
+        )?;
+
+        info!(
+            "{} <blue>media tap:</> new tap client on real video channel <b>{:#04x}</> ({:?}); requesting keyframe via VIDEO_FOCUS_NOTIFICATION native→projected",
+            get_name(proxy_type),
+            channel,
+            display_type
+        );
+
+        for (label, pkt) in [("native", native_pkt), ("projected", projected_pkt)] {
+            match tx.try_send(pkt) {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    warn!(
+                        "{} <yellow>media tap keyframe request:</> queue full while sending {} focus for channel <b>{:#04x}</>; skipped",
+                        get_name(proxy_type),
+                        label,
+                        channel
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    return Err("media tap keyframe request queue closed".into());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn maybe_emit_pending_injected_focus(
     proxy_type: ProxyType,
     ctx: &mut ModifyContext,
@@ -440,6 +540,7 @@ pub fn maybe_emit_pending_injected_focus(
     tx: &Sender<Packet>,
 ) -> Result<()> {
     ensure_map_album_art_h264_virtual_tap(proxy_type, ctx, cfg);
+    maybe_request_real_video_keyframe(proxy_type, ctx, cfg, tx)?;
 
     let mut ready_channels: Vec<(u8, u8, bool, DisplayType)> = Vec::new();
     let mut toggle_channels: Vec<(u8, u8, DisplayType)> = Vec::new();

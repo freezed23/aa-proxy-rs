@@ -200,6 +200,10 @@ pub struct ModifyContext {
     pub(crate) injected_media_state: HashMap<u8, InjectedMediaState>,
     /// Last observed tap client connection generation by media channel.
     pub(crate) injected_media_connect_gen: HashMap<u8, u64>,
+    /// Real (HU-advertised, not injected) video channels -> display type.
+    pub(crate) real_video_channels: HashMap<u8, DisplayType>,
+    /// Last seen tap client connect generation per real video channel.
+    pub(crate) real_video_connect_gen: HashMap<u8, u64>,
     /// Last observed tap-consumer presence by media channel.
     pub(crate) injected_media_had_tap_client: HashMap<u8, bool>,
     /// Internal broadcast receivers kept alive while map_album_art_source=rust_h264.
@@ -485,6 +489,8 @@ async fn populate_media_tap_channels_by_order(
     //   +15 video-aux-1, +16 video-aux-2, ...
     // Missing sinks simply have no registered channel/output; their listeners stay open.
     ctx.media_channels.clear();
+    ctx.real_video_channels.clear();
+    ctx.real_video_connect_gen.clear();
     {
         let mut shared_media_channels = ctx.shared_media_channels.lock().await;
         shared_media_channels.clear();
@@ -557,6 +563,10 @@ async fn populate_media_tap_channels_by_order(
             )
             .await;
             register_media_channel_sink(ctx, ch, sink).await;
+            if !ctx.injected_media_display.contains_key(&ch) {
+                ctx.real_video_channels
+                    .insert(ch, svc.media_sink_service.display_type());
+            }
             debug!(
                 "{} media_channels.insert: ch={:#04x} offset={} media_order=static_slot",
                 get_name(proxy_type),
@@ -4355,6 +4365,8 @@ pub async fn proxy<D: IoDeviceTrait>(
         injected_media_profile_ids: HashMap::new(),
         injected_media_state: HashMap::new(),
         injected_media_connect_gen: HashMap::new(),
+        real_video_channels: HashMap::new(),
+        real_video_connect_gen: HashMap::new(),
         injected_media_had_tap_client: HashMap::new(),
         map_album_art_h264_virtual_taps: HashMap::new(),
         vendor_service_ids: HashSet::new(),
@@ -4793,6 +4805,8 @@ mod tests {
             injected_media_profile_ids: HashMap::new(),
             injected_media_state: HashMap::new(),
             injected_media_connect_gen: HashMap::new(),
+            real_video_channels: HashMap::new(),
+            real_video_connect_gen: HashMap::new(),
             injected_media_had_tap_client: HashMap::new(),
             map_album_art_h264_virtual_taps: HashMap::new(),
             vendor_service_ids: HashSet::new(),
