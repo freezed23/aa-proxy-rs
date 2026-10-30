@@ -1,25 +1,26 @@
-## 2026-10-30 원격 빌드 추가 — 아래 수동 전용/원격 TODO는 이 절로 대체
+## 2026-10-30 원격 AA 실행 — 구현 병합 및 환경 preflight PASS
 
-사용자가 원격화·NAS 자동 복사·Telegram 연결을 새로 요청했다.
-[AA Owner Build](https://github.com/freezed23/khud/blob/main/.github/workflows/aa-owner-build.yml)는
-private `freezed23/khud`의 기존 Windows 러너를 재사용하는 **AA 전용** 작업이다.
-KHUD Owner Build/APK/ESP32 실행과 다르며 이 AA 포크의 별도 러너 등록은 필요 없다.
-구현 병합: [khud #584](https://github.com/freezed23/khud/pull/584), `e2678ca6dbae20fa4ec84a87155e9b9738839ba2`.
-운영 상세: [tools/aa-remote/README.md](https://github.com/freezed23/khud/blob/main/tools/aa-remote/README.md).
+기존 수동 전용/TODO 정책은 소유자의 새 원격화 요청으로 대체됐다.
+AA 바이너리는 이 포크에서 빌드하며, 실행은 private `freezed23/khud`의 별도 **AA Owner Build**를 사용한다.
+KHUD Owner Build/APK/ESP32 작업과는 구분한다. 포크에 새 러너를 등록할 필요는 없다.
+구현 [khud #584](https://github.com/freezed23/khud/pull/584), AI 진입점 [포크 #3](https://github.com/freezed23/aa-proxy-rs/pull/3) 병합 완료.
 
-- GPT·Claude: 사용자의 명시적 **AA 빌드** 요청 때 이 저장소의 소유자 선택 ref를 전체40자리SHA로 해석한다.
-  선택이 없으면 현행 main/aaw1/*와 미병합 PR을 확인하고 소스를 확인한다. 구형 v1.1.0/임의 main으로 대체하지 않는다.
-- 연결된 GitHub 계정 `freezed23`로 **khud**에 Issue 생성: 제목 `[AA BUILD]`, 본문 전체 `build <AA-full-SHA>`.
-  Actions의 **AA Owner Build** 결과·Issue 댓글을 확인. `[KHUD GS BUILD]`를 사용하지 않는다.
-- 설정 점검은 같은 제목에 본문 `preflight`: Docker 엔진/NAS 읽기·쓰기만 검사, 컴파일 없음.
-- AAW1 ARMv7 Docker export → ELF32 ARM 검사 → 정확한 SHA/크기/해시 기록 →
-  PC `K:\\ci\\out\\aa-proxy-rs\\run<id>-attempt<n>` 및 NAS `\\\\freezed-4t\\homes\\GPT\\AAProxy\\run<id>-attempt<n>`.
-  모든 복사 파일 SHA256 대조, NAS 실패는 작업 실패로 보고하고 PC 파일 보존.
-- Telegram은 PC private JSON 또는 `AA_TELEGRAM_BOT_TOKEN`/`AA_TELEGRAM_CHAT_ID` secrets에 설정한 경우만 전송.
-  토큰이 없으면 NOT CONFIGURED. 빌드/NAS/알림 결과는 별도로 보고한다.
-- 구현과 실제 Docker 가용성·새 바이너리 BUILT·장치 실행은 구분. 최초 preflight는
-  [khud issue #585](https://github.com/freezed23/khud/issues/585)에서 확인한다. 아직 성공을 추정하지 않는다.
-- 아래의 기기 전송·백업/복구·5GHz 주의사항은 유지한다. 원격 빌드만으로 장치 설치를 승인한 것이 아니다.
+GPT·Claude는 사용자의 명시 AA 빌드 요청 때 소유자 선택 ref를 전체40자리SHA로 해석하고,
+연결된 `freezed23` 계정으로 private khud에 제목 `[AA BUILD]`, 본문 전체 `build <AA-full-SHA>` Issue를 만든다.
+소스 선택이 없으면 현행 refs와 열린 PR을 확인하고 선택을 확인한다. 구형 v1.1.0/임의 main으로 대체하지 않는다.
+`preflight`는 컴파일 없이 Docker와 NAS 환경만 검사한다.
+[run41077085999](https://github.com/freezed23/khud/actions/runs/41077085999) SUCCESS:
+Docker 연결 및 AA 전용 NAS 파일 쓰기·읽기 확인. 전체 바이너리 빌드·복사 해시 대조와 장치 runtime은 아직 미검증.
+
+빌드 산출물은 실행/재시도별 전용 폴더에 보관한다.
+실행 파일·SHA256SUMS·BUILD_STATUS.json·build.log를 기록하고 ELF32 ARM 및 NAS 파일별 SHA256을 검사한다.
+내부 호스트/PC 경로와 러너 운영 세부는
+[private 운영 지침](https://github.com/freezed23/khud/blob/main/tools/aa-remote/README.md)에 둔다.
+
+Telegram 완료 알림 코드 포함. 최초 점검 결과 **NOT CONFIGURED**:
+private 봇 토큰과 numeric chat ID 등록 후 전송 가능하며 실제 SENT 증거는 아직 없다.
+토큰을 공개 Git/Issue에 넣지 않는다. NAS·빌드·알림 결과를 구분한다.
+빌드 요청만으로 장치 설치를 실행하지 않는다. 아래 기기 전송/백업/복구/5GHz 절차는 유지한다.
 
 # AAWireless 1(CS317) — AAProxy 빌드·전송 인수인계
 
