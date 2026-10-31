@@ -1,3 +1,9 @@
+## 2026-10-31 #5 USB FunctionFS 주의사항 — 과거 v1.1 상태를 현재 상태로 사용 금지
+
+- 이전 [AA docs PR #5](https://github.com/freezed23/aa-proxy-rs/pull/5)에서 지적한 **v1.2 FunctionFS 기반 USB 가젯과 v1.1 rootfs의 구형 `S92usb_gadget`/`umtprd` 시작 경로 충돌 가능성**은 정적 설계상 유효한 **바이너리만 교체할 때의 주의사항**이다. 기존 v1.1 rootfs의 가젯 점유 여부를 확인하지 않고 v1.2 실행 파일만 덮어쓰지 않는다.
+- **현재 사용자 상태가 다르다:** 소유자는 장치 v1.2로 복구 후 Windows DHU / AA TBT 수신 및 protobuf 로그 추출을 다시 확인했다. 따라서 #5의 '현재 기기 실행 파일 = v1.1/fc461e8', 'v1.2 기기 실행 증거 없음', '1.2 이미지 설치 예정'이라는 문장은 **10/30 당시 체크포인트로만 해석**한다. 현 장치의 실제 `/usr/bin/aa-proxy-rs` SHA는 별도로 비교하지 않았으며, fork draft #7의 IDR 코드를 실제 설치된 것으로 주장할 수 없다.
+- KHUD/Hub [2026-10-31 PR 정리 기록](https://github.com/freezed23/ai-project-hub/blob/main/projects/hud-navigation/PR_RECONCILIATION_20261031.md)에 따라 원본 #5는 직접 병합 대신 수정된 사실만 이 문서에서 보존하고 **INTEGRATED/SUPERSEDED** 분류한다. 본 문서 PR은 **docs only**, 바이너리/이미지/USB 시작 스크립트 수정·빌드·플래시·재부팅 없음.
+
 
 > **OWNER CORRECTION (2026-10-31):** **과거에는 TMAP 내장 모의주행** 중 클러스터 TBT가 기대대로 표시되지 않았고, **현재는 Android Mock Location으로 GPS를 이동시키는 별도 시험을 진행 중**. 일반 경로 안내 시작 때 관측된 `0x8006/0x8007`과 Mock Location 주행 도중 연속 갱신 여부(아직 로그 미제공)를 구분한다.
 ## 2026-10-31 Windows DHU NAVIGATIONSTATUS 벤치 성공 — 기존 빌드/런타임 상태 구분
