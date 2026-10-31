@@ -6,15 +6,17 @@ message PhoneInfo {
   optional string connectivity_lifetime_id = 2;
 }
 
+// HU text is opaque on the wire: some real HUs send non-UTF-8 metadata.
+// Keep the original bytes through SDR edits; decode only for presentation.
 message HeadUnitInfo {
-  optional string make = 1;
-  optional string model = 2;
-  optional string year = 3;
-  optional string vehicle_id = 4;
-  optional string head_unit_make = 5;
-  optional string head_unit_model = 6;
-  optional string head_unit_software_build = 7;
-  optional string head_unit_software_version = 8;
+  optional bytes make = 1;
+  optional bytes model = 2;
+  optional bytes year = 3;
+  optional bytes vehicle_id = 4;
+  optional bytes head_unit_make = 5;
+  optional bytes head_unit_model = 6;
+  optional bytes head_unit_software_build = 7;
+  optional bytes head_unit_software_version = 8;
 }
 
 message VersionRequestOptions { optional int64 snapshot_version = 1; }
@@ -36,18 +38,18 @@ message ServiceDiscoveryRequest {
 
 message ServiceDiscoveryResponse {
   repeated Service services = 1;
-  optional string make = 2 [ deprecated = true ];
-  optional string model = 3 [ deprecated = true ];
-  optional string year = 4 [ deprecated = true ];
-  optional string vehicle_id = 5 [ deprecated = true ];
+  optional bytes make = 2 [ deprecated = true ];
+  optional bytes model = 3 [ deprecated = true ];
+  optional bytes year = 4 [ deprecated = true ];
+  optional bytes vehicle_id = 5 [ deprecated = true ];
   optional DriverPosition driver_position = 6;
-  optional string head_unit_make = 7 [ deprecated = true ];
-  optional string head_unit_model = 8 [ deprecated = true ];
-  optional string head_unit_software_build = 9 [ deprecated = true ];
-  optional string head_unit_software_version = 10 [ deprecated = true ];
+  optional bytes head_unit_make = 7 [ deprecated = true ];
+  optional bytes head_unit_model = 8 [ deprecated = true ];
+  optional bytes head_unit_software_build = 9 [ deprecated = true ];
+  optional bytes head_unit_software_version = 10 [ deprecated = true ];
   optional bool can_play_native_media_during_vr = 11 [ deprecated = true ];
   optional int32 session_configuration = 13;
-  optional string display_name = 14;
+  optional bytes display_name = 14;
   optional bool probe_for_support = 15;
   optional ConnectionConfiguration connection_configuration = 16;
   optional HeadUnitInfo headunit_info = 17;
@@ -231,7 +233,7 @@ message InputSourceService {
 }
 
 message BluetoothService {
-  required string car_address = 1;
+  required bytes car_address = 1;
   repeated BluetoothPairingMethod supported_pairing_methods = 2
       [ packed = true ];
 }
@@ -284,8 +286,8 @@ message PhoneStatusService {}
 message MediaBrowserService {}
 
 message VendorExtensionService {
-  required string service_name = 1;
-  repeated string package_white_list = 2;
+  required bytes service_name = 1;
+  repeated bytes package_white_list = 2;
   optional bytes data = 3;
 }
 
@@ -631,7 +633,7 @@ message BluetoothAuthenticationData {
 
 message BluetoothAuthenticationResult { required MessageStatus status = 1; }
 
-message WifiProjectionService { optional string car_wifi_bssid = 1; }
+message WifiProjectionService { optional bytes car_wifi_bssid = 1; }
 
 message WifiCredentialsRequest {}
 

@@ -1336,7 +1336,8 @@ async fn update_last_service_discovery_response(
 ) {
     match protobuf_json_mapping::print_to_string(msg) {
         Ok(json_string) => match serde_json::from_str::<serde_json::Value>(&json_string) {
-            Ok(json_value) => {
+            Ok(mut json_value) => {
+                crate::sdr_text::restore_json_text(&mut json_value);
                 *last_service_discovery_response.write().await = Some(json_value);
             }
             Err(e) => {
@@ -3459,15 +3460,15 @@ pub async fn pkt_modify_hook(
 
             // enabling developer mode
             if cfg.developer_mode {
-                msg.set_make(DHU_MAKE.into());
-                msg.set_model(DHU_MODEL.into());
-                msg.set_head_unit_make(DHU_MAKE.into());
-                msg.set_head_unit_model(DHU_MODEL.into());
+                msg.set_make(DHU_MAKE.as_bytes().to_vec());
+                msg.set_model(DHU_MODEL.as_bytes().to_vec());
+                msg.set_head_unit_make(DHU_MAKE.as_bytes().to_vec());
+                msg.set_head_unit_model(DHU_MODEL.as_bytes().to_vec());
                 if let Some(info) = msg.headunit_info.as_mut() {
-                    info.set_make(DHU_MAKE.into());
-                    info.set_model(DHU_MODEL.into());
-                    info.set_head_unit_make(DHU_MAKE.into());
-                    info.set_head_unit_model(DHU_MODEL.into());
+                    info.set_make(DHU_MAKE.as_bytes().to_vec());
+                    info.set_model(DHU_MODEL.as_bytes().to_vec());
+                    info.set_head_unit_make(DHU_MAKE.as_bytes().to_vec());
+                    info.set_head_unit_model(DHU_MODEL.as_bytes().to_vec());
                 }
                 info!(
                     "{} <yellow>{:?}</>: enabling developer mode",

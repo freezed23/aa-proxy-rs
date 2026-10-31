@@ -1,3 +1,8 @@
+## 2026-11-01 SDR byte-preserving repair — SOURCE ONLY, NO BUILD
+
+- New `fix/aaw1-v12-sdr-bytes-20261101-gpt` stacks on PR #7 `e5b180f`, not main. SDR's 21 HU text fields retain opaque bytes; presentation/generated API callers adapted; Wi-Fi password log and optional raw credential-frame hex suppressed.
+- [Scope, evidence and pending gates](SDR_OPAQUE_METADATA_20261101.md): Python schema/wire checks 7/7 PASS; native Rust tests prepared but unrun. IMPLEMENTED / UNBUILT / REAL-HU RETEST PENDING. No device/settings change or build/CI. Existing #7 flicker remains separate. Build only after an explicit owner request against the exact repair SHA.
+
 ## 2026-10-30 원격 AA 실행 — 구현 병합 및 환경 preflight PASS
 
 기존 수동 전용/TODO 정책은 소유자의 새 원격화 요청으로 대체됐다.

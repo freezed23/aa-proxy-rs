@@ -191,7 +191,7 @@ pub(crate) fn vendor_extension_service_id(msg: &ServiceDiscoveryResponse) -> Opt
         .find(|svc| {
             svc.vendor_extension_service
                 .as_ref()
-                .map(|ves| ves.service_name() == OUR_COMPANION_SERVICE_NAME)
+                .map(|ves| ves.service_name() == OUR_COMPANION_SERVICE_NAME.as_bytes())
                 .unwrap_or(false)
         })
         .map(|svc| svc.id() as u8)
@@ -216,9 +216,9 @@ pub(crate) fn add_vendor_extension_service(
     service.set_id(next_service_id);
 
     let mut ves = VendorExtensionService::new();
-    ves.set_service_name(OUR_COMPANION_SERVICE_NAME.to_string());
+    ves.set_service_name(OUR_COMPANION_SERVICE_NAME.as_bytes().to_vec());
     ves.package_white_list
-        .push(OUR_COMPANION_PACKAGE.to_string());
+        .push(OUR_COMPANION_PACKAGE.as_bytes().to_vec());
 
     service.vendor_extension_service = protobuf::MessageField::some(ves);
     msg.services.push(service);
