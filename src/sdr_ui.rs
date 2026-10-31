@@ -363,7 +363,7 @@ pub async fn process_service_discovery_response(
 ) -> Result<SdrUiApplySummary> {
     let path = cfg.sdr_ui_override_file.clone();
     let vehicle_info = vehicle_info_from_sdr(msg);
-    let vehicle_id = vehicle_fingerprint(&vehicle_info);
+    let vehicle_id = vehicle_fingerprint_from_sdr(msg, &vehicle_info);
     let vehicle_name = vehicle_name(&vehicle_info);
     let phone = current_phone();
     let snapshot = snapshot_displays(msg);
@@ -1276,4 +1276,38 @@ mod tests {
         };
         assert!(resolve_live_margin_updates(&vehicle_profile, None).is_empty());
     }
+}
+
+fn vehicle_fingerprint_from_sdr(msg: &ServiceDiscoveryResponse, info: &SdrUiVehicleInfo) -> String {
+    let hu = &msg.headunit_info;
+    fn select<'a>(a: &'a [u8], b: &'a [u8]) -> &'a [u8] {
+        if a.is_empty()
+            || std::str::from_utf8(a)
+                .map(|v| v.trim().is_empty())
+                .unwrap_or(false)
+        {
+            b
+        } else {
+            a
+        }
+    }
+    let fields = [
+        select(hu.make(), msg.make()),
+        select(hu.model(), msg.model()),
+        select(hu.year(), msg.year()),
+        select(hu.vehicle_id(), msg.vehicle_id()),
+        msg.display_name(),
+        select(hu.head_unit_make(), msg.head_unit_make()),
+        select(hu.head_unit_model(), msg.head_unit_model()),
+        select(
+            hu.head_unit_software_build(),
+            msg.head_unit_software_build(),
+        ),
+        select(
+            hu.head_unit_software_version(),
+            msg.head_unit_software_version(),
+        ),
+        info.driver_position.as_deref().unwrap_or("").as_bytes(),
+    ];
+    crate::sdr_text::opaque_identity(&fields).unwrap_or_else(|| vehicle_fingerprint(info))
 }

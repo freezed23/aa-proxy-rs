@@ -1,0 +1,16 @@
+# Apply intentionally before a new AA connection; this file is not auto-loaded.
+pkt_debug = true
+pkt_debug_filter_enabled = true
+hexdump_level = "All"
+pkt_debug_full_frame_enabled = true
+pkt_debug_filter_proxy = "both"
+pkt_debug_filter_stages = "decrypted_input,raw_output"
+pkt_debug_filter_channels = "0"
+pkt_debug_filter_service_kinds = "control"
+pkt_debug_filter_exclude_channels = ""
+pkt_debug_filter_exclude_message_ids = ""
+pkt_debug_filter_message_ids = "0x0001,0x0002,0x0006,0x0007,0x0008,0x0009,0x000D,0x000E,0x000F,0x0010,0x001A,0x00FF"
+pkt_debug_filter_pretty_proto = true
+pkt_debug_filter_max_payload_bytes = 16384
+pkt_debug_capture_dir = ""
+# Optional: /data/aa-proxy-rs/private-captures (created 0700, files 0600).

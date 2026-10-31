@@ -111,3 +111,38 @@ mod tests {
         assert_eq!(msg.write_to_bytes().unwrap(), wire_before);
     }
 }
+
+/// Keep identity separate from presentation (FF and literal "non-UTF8[ff]").
+/// Return None for all-valid metadata so existing profile fingerprints survive.
+pub(crate) fn opaque_identity(fields: &[&[u8]]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if fields
+        .iter()
+        .all(|value| std::str::from_utf8(value).is_ok())
+    {
+        return None;
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"aa-sdr-opaque-identity-v1");
+    for value in fields {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value);
+    }
+    Some(format!("veh_{}", &hex::encode(hash.finalize())[..12]))
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    #[test]
+    fn display_collision_does_not_merge_raw_vehicle_identities() {
+        assert_eq!(display_text(&[0xff]), display_text(b"non-UTF8[ff]"));
+        assert!(opaque_identity(&[b"non-UTF8[ff]"]).is_none());
+        assert!(opaque_identity(&[&[0xff]]).is_some());
+        assert_ne!(
+            opaque_identity(&[&[0xff], b"ab", b"c"]),
+            opaque_identity(&[&[0xff], b"a", b"bc"])
+        );
+        assert_ne!(opaque_identity(&[&[0xff]]), opaque_identity(&[&[0xfe]]));
+    }
+}

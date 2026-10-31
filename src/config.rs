@@ -599,6 +599,8 @@ pub struct AppConfig {
     /// Passive pkt_debug helper: reassemble fragmented decrypted frames for logging only.
     /// Normal forwarding is not delayed or modified. Uses the existing pkt_debug filters and max payload limit.
     pub pkt_debug_full_frame_enabled: bool,
+    /// Optional private bounded control/NAV binary capture. Empty disables file capture.
+    pub pkt_debug_capture_dir: String,
     pub legacy: bool,
     /// When true, do not switch to the accessory gadget unless the HU actually sends ACCESSORY=START.
     /// Useful when the HU/car sleeps while aa-proxy-rs keeps running; prevents stale accessory attachment.
@@ -1122,6 +1124,7 @@ impl Default for AppConfig {
             pkt_debug_filter_pretty_proto: true,
             pkt_debug_filter_max_payload_bytes: 2048,
             pkt_debug_full_frame_enabled: false,
+            pkt_debug_capture_dir: String::new(),
             legacy: true,
             usb_gadget_require_accessory_start: false,
             usb_gadget_rearm_on_disconnect: false,
@@ -1475,6 +1478,7 @@ impl AppConfig {
         doc["pkt_debug_filter_max_payload_bytes"] =
             value(self.pkt_debug_filter_max_payload_bytes as i64);
         doc["pkt_debug_full_frame_enabled"] = value(self.pkt_debug_full_frame_enabled);
+        doc["pkt_debug_capture_dir"] = value(self.pkt_debug_capture_dir.to_string());
         doc["legacy"] = value(self.legacy);
         doc["usb_gadget_require_accessory_start"] = value(self.usb_gadget_require_accessory_start);
         doc["usb_gadget_rearm_on_disconnect"] = value(self.usb_gadget_rearm_on_disconnect);
@@ -1677,5 +1681,45 @@ impl AppConfig {
     pub fn load_config_json() -> Result<ConfigJson, Box<dyn std::error::Error>> {
         let parsed: ConfigJson = serde_json::from_str(Self::CONFIG_JSON)?;
         Ok(parsed)
+    }
+}
+
+impl From<&AppConfig> for crate::packet_debug_config::PacketDebugConfig {
+    fn from(cfg: &AppConfig) -> Self {
+        Self {
+            pkt_debug: cfg.pkt_debug,
+            hexdump_level: cfg.hexdump_level,
+            pkt_debug_full_frame_enabled: cfg.pkt_debug_full_frame_enabled,
+            pkt_debug_filter_enabled: cfg.pkt_debug_filter_enabled,
+            pkt_debug_filter_proxy: cfg.pkt_debug_filter_proxy.clone(),
+            pkt_debug_filter_stages: cfg.pkt_debug_filter_stages.clone(),
+            pkt_debug_filter_service_kinds: cfg.pkt_debug_filter_service_kinds.clone(),
+            pkt_debug_filter_channels: cfg.pkt_debug_filter_channels.clone(),
+            pkt_debug_filter_exclude_channels: cfg.pkt_debug_filter_exclude_channels.clone(),
+            pkt_debug_filter_message_ids: cfg.pkt_debug_filter_message_ids.clone(),
+            pkt_debug_filter_exclude_message_ids: cfg.pkt_debug_filter_exclude_message_ids.clone(),
+            pkt_debug_filter_pretty_proto: cfg.pkt_debug_filter_pretty_proto,
+            pkt_debug_filter_max_payload_bytes: cfg.pkt_debug_filter_max_payload_bytes,
+            pkt_debug_capture_dir: cfg.pkt_debug_capture_dir.clone(),
+        }
+    }
+}
+
+impl crate::packet_debug_config::PacketDebugConfig {
+    pub(crate) fn matches_app_config(&self, cfg: &AppConfig) -> bool {
+        self.pkt_debug == cfg.pkt_debug
+            && self.hexdump_level == cfg.hexdump_level
+            && self.pkt_debug_full_frame_enabled == cfg.pkt_debug_full_frame_enabled
+            && self.pkt_debug_filter_enabled == cfg.pkt_debug_filter_enabled
+            && self.pkt_debug_filter_proxy == cfg.pkt_debug_filter_proxy
+            && self.pkt_debug_filter_stages == cfg.pkt_debug_filter_stages
+            && self.pkt_debug_filter_service_kinds == cfg.pkt_debug_filter_service_kinds
+            && self.pkt_debug_filter_channels == cfg.pkt_debug_filter_channels
+            && self.pkt_debug_filter_exclude_channels == cfg.pkt_debug_filter_exclude_channels
+            && self.pkt_debug_filter_message_ids == cfg.pkt_debug_filter_message_ids
+            && self.pkt_debug_filter_exclude_message_ids == cfg.pkt_debug_filter_exclude_message_ids
+            && self.pkt_debug_filter_pretty_proto == cfg.pkt_debug_filter_pretty_proto
+            && self.pkt_debug_filter_max_payload_bytes == cfg.pkt_debug_filter_max_payload_bytes
+            && self.pkt_debug_capture_dir == cfg.pkt_debug_capture_dir
     }
 }

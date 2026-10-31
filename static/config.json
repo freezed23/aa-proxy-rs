@@ -1042,6 +1042,10 @@
               "description": "When packet debug filtering is enabled, truncate payload dumps to this many bytes. 0 disables truncation.",
               "advanced": true
             },
+            "pkt_debug_capture_dir": {
+              "typ": "string",
+              "description": "Optional absolute private directory for bounded original SDR/NAV binary captures. Empty disables capture. Files contain private data; 32 MiB/128 files per process, 256 KiB per message."
+            },
             "pkt_debug_full_frame_enabled": {
               "typ": "boolean",
               "description": "Passive debug helper: reassemble fragmented decrypted frames and log the full frame at LAST without changing forwarding. Uses existing pkt_debug filters and max payload limit.",

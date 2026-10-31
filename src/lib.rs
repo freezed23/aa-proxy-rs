@@ -13,7 +13,9 @@ pub mod companion_protocol;
 pub mod config;
 pub mod config_types;
 pub mod crash;
+pub(crate) mod debug_capture;
 pub mod device_info;
+pub(crate) mod diagnostic_privacy;
 pub mod display;
 pub mod ev;
 pub mod ffs_io;
@@ -34,6 +36,7 @@ pub mod mpegts;
 pub mod mtp;
 pub mod overlay;
 pub mod overlay_vars;
+pub mod packet_debug_config;
 pub mod packet_fragment;
 pub mod proxy;
 #[cfg(feature = "wasm-scripting")]

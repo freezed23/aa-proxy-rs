@@ -1,3 +1,9 @@
+## 2026-11-01 Follow-up capture/log hardening — owner requests new AA build
+
+- `fix/aaw1-capture-hardening-20261101-gpt` stacks on SDR #11 `dda5102`. [Changes, limits, tests and remaining gates](CAPTURE_HARDENING_20261101.md). Existing #11 was BUILT in run41225353685; it is preserved as a limited earlier candidate, not a complete privacy/capture fix.
+- Focused native Rust 20 PASS, source-integration guards 5 PASS and schema/wire 7 PASS. New owner-requested ARMv7 build must use the exact new SHA. No KHUD APK/ESP32 or device deployment. [Control](capture-control.example.toml) and [mapped NAV](capture-navigation.example.toml) profiles are explicit examples, not auto-applied device settings.
+- All historical NO BUILD/UNBUILT statements below describe earlier checkpoints. Final product build provenance is recorded in khud/Hub; actual vehicle verification remains separate.
+
 ## 2026-11-01 SDR byte-preserving repair — SOURCE ONLY, NO BUILD
 
 - New `fix/aaw1-v12-sdr-bytes-20261101-gpt` stacks on PR #7 `e5b180f`, not main. SDR's 21 HU text fields retain opaque bytes; presentation/generated API callers adapted; Wi-Fi password log and optional raw credential-frame hex suppressed.
