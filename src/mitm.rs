@@ -204,6 +204,8 @@ pub struct ModifyContext {
     pub(crate) real_video_channels: HashMap<u8, DisplayType>,
     /// Last seen tap client connect generation per real video channel.
     pub(crate) real_video_connect_gen: HashMap<u8, u64>,
+    pub(crate) real_video_hu_focus: HashMap<u8, VideoFocusMode>,
+    pub(crate) real_video_last_toggle: HashMap<u8, std::time::Instant>,
     /// Last observed tap-consumer presence by media channel.
     pub(crate) injected_media_had_tap_client: HashMap<u8, bool>,
     /// Internal broadcast receivers kept alive while map_album_art_source=rust_h264.
@@ -491,6 +493,8 @@ async fn populate_media_tap_channels_by_order(
     ctx.media_channels.clear();
     ctx.real_video_channels.clear();
     ctx.real_video_connect_gen.clear();
+    ctx.real_video_hu_focus.clear();
+    ctx.real_video_last_toggle.clear();
     {
         let mut shared_media_channels = ctx.shared_media_channels.lock().await;
         shared_media_channels.clear();
@@ -2141,6 +2145,13 @@ pub async fn pkt_modify_hook(
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
         return Ok(PacketAction::Forward);
+    }
+
+    if proxy_type == ProxyType::HeadUnit
+        && flow == PacketFlow::FromEndpoint
+        && (pkt.flags & _CONTROL) == 0
+    {
+        crate::display::observe_real_video_focus(pkt, ctx);
     }
 
     if let Some(handled) =
@@ -4367,6 +4378,8 @@ pub async fn proxy<D: IoDeviceTrait>(
         injected_media_connect_gen: HashMap::new(),
         real_video_channels: HashMap::new(),
         real_video_connect_gen: HashMap::new(),
+            real_video_hu_focus: HashMap::new(),
+            real_video_last_toggle: HashMap::new(),
         injected_media_had_tap_client: HashMap::new(),
         map_album_art_h264_virtual_taps: HashMap::new(),
         vendor_service_ids: HashSet::new(),
@@ -4807,6 +4820,8 @@ mod tests {
             injected_media_connect_gen: HashMap::new(),
             real_video_channels: HashMap::new(),
             real_video_connect_gen: HashMap::new(),
+            real_video_hu_focus: HashMap::new(),
+            real_video_last_toggle: HashMap::new(),
             injected_media_had_tap_client: HashMap::new(),
             map_album_art_h264_virtual_taps: HashMap::new(),
             vendor_service_ids: HashSet::new(),
