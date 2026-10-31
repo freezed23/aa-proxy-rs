@@ -51,7 +51,7 @@ Selected raw wire payloads (hex bytes from owner-supplied **decrypted** logs; no
 0x8007 80 07 0A 0E 0A 0A 08 80 01 12 03 31 32 38 18 01 10 20 12 16 0A 0A 08 98 EF 02 12 02 34 37 18 02 12 05 32 30 3A 35 31 18 94 16
 ```
 
-No `NavigationLane` entries in this sample, no repeated maneuver-enum family coverage and no route-end/status transitions yet. The owner's **simulation mode** showed AA route progress without expected cluster TBT, while **normal route guidance** produced the messages; do not generalize this app-/mode-specific bench observation to all AA simulation sessions.
+No `NavigationLane` entries in this sample, no repeated maneuver-enum family coverage and no route-end/status transitions yet. **Owner correction on test chronology:** the earlier run with AA main-screen guidance but without the expected cluster TBT was **TMAP's own built-in simulated driving**. The owner is **now conducting a separate Android Mock Location test** by moving simulated GPS coordinates. These are different tests. The 0x8006/0x8007 sample came from starting normal route guidance; continuous updates during the current Mock Location drive are not yet supplied. The `0x8006/0x8007` sample was captured when ordinary route guidance was started. **Whether new `0x8006/0x8007` messages continue to update as Mock Location coordinates move is NOT YET VERIFIED**; a lack of cluster changes at a prior observation does not prove Mock Location suppresses the AA navigation service. Capture timestamped consecutive messages before/during/after the mock movement and route-end `0x8003` to resolve.
 
 Packet-oriented spot check on device (never post unredacted full config or Wi-Fi credentials):
 
