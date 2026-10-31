@@ -1258,6 +1258,29 @@ fn render_template(template: &str, vars: &[(&str, &str)]) -> String {
     output
 }
 
+/// Repair incompatible AAW1 v1.1 hostapd defaults only for 5 GHz/11ac.
+fn sanitize_legacy_5ghz_hostapd(template: &str) -> String {
+    let mut out = String::new();
+    for line in template.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("wpa_pairwise=") || trimmed.starts_with("ht_capab=") {
+            out.push('#');
+            out.push_str(line);
+            out.push('\n');
+        } else if trimmed.starts_with("rsn_pairwise=")
+            || trimmed.starts_with("#rsn_pairwise=")
+            || trimmed.starts_with("wmm_enabled=")
+        {
+            // Emit a single compatible CCMP/WMM set below.
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    out.push_str("rsn_pairwise=CCMP\nwmm_enabled=1\n");
+    out
+}
+
 fn generate_hostapd_conf(config: AppConfig) -> std::io::Result<()> {
     info!(
         "{} 🗃️ Generating config from input template: <bold><green>{}</>",
@@ -1272,6 +1295,11 @@ fn generate_hostapd_conf(config: AppConfig) -> std::io::Result<()> {
     };
 
     let template = fs::read_to_string(HOSTAPD_CONF_IN)?;
+    let template = if hostapd_mode == "a" && config.wifi_version >= 5 {
+        sanitize_legacy_5ghz_hostapd(&template)
+    } else {
+        template
+    };
 
     // Eventually: For 6 GHz, we will need more options like opclass.
     let rendered = render_template(
@@ -1669,4 +1697,19 @@ fn main() -> Result<()> {
     );
 
     Ok(())
+}
+ 
+#[cfg(test)]
+mod aaw1_wifi_tests {
+    use super::sanitize_legacy_5ghz_hostapd;
+
+    #[test]
+    fn sanitizes_v11_5ghz_template() {
+        let old = "wpa_pairwise=TKIP\n#rsn_pairwise=CCMP\nht_capab=[HT20][HT40+]\n";
+        let updated = sanitize_legacy_5ghz_hostapd(old);
+        assert!(!updated.lines().any(|l| l == "wpa_pairwise=TKIP"));
+        assert!(!updated.lines().any(|l| l.starts_with("ht_capab=")));
+        assert!(updated.contains("rsn_pairwise=CCMP\n"));
+        assert!(updated.contains("wmm_enabled=1\n"));
+    }
 }
