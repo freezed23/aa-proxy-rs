@@ -1,3 +1,9 @@
+## 2026-10-31 Windows DHU NAVIGATIONSTATUS 벤치 성공 — 기존 빌드/런타임 상태 구분
+
+- **소유자 기존 AAW1 CS317 + Windows DHU 2.0-windows + Galaxy S23**: Zadig WinUSB로 USB `18D1:2D00` 드라이버 오류를 정리한 후 Android Auto 메인 화면 및 Instrument Cluster 표시 확인. DHU `instrumentcluster=true`, `navcluster=true`에서 `ServiceDiscoveryResponse`에 `navigation_status_service` 등장, 이번 세션 서비스 채널 `0x06`. `0x8003` ID, `0x8006` TURN_NORMAL_RIGHT=8/"교차로", `0x8007` 128m/32s/47km/2,836s/ETA20:51 복호화 Protobuf. **OWNER_DEVICE_OBSERVED: WINDOWS_DHU_BENCH**, 다른 HU/실차/장시간/차선/안내 종료/시뮬레이션 TBT는 아직 검증되지 않음.
+- 재현·원본 일부 패킷·개인정보 주의: [AAW1_DHU_NAVSTATUS_BENCH_20261031.md](AAW1_DHU_NAVSTATUS_BENCH_20261031.md). 명시적으로 AA **소스 PR #7** `e5b180f`는 여전히 OPEN DRAFT/UNMERGED이고 owner-build `41186815239` 성공 ELF/NAS 해시는 **장치 현재 바이너리 해시와 미대조**. 이 벤치가 USB FunctionFS HUR stall 전체 해결이나 keyframe toggle의 실제 효력까지 증명하지 않는다. KHUD 제품에 추가 proxy HW 의존성 도입 아님.
+- 아래 기존 10/30 인수인계의 `원격 자동 빌드 미구현`/ `현행 v1.2 미빌드` 같은 당시 표현은 **역사적 체크포인트**이며 이 10/31 후속 섹션의 self-hosted AA 빌드 및 사용자 벤치 관측으로 보완된다. 새로운 AA/KHUD 빌드나 배포/설치 동작 없음.
+
 ## 2026-10-30 원격 AA 실행 — 구현 병합 및 환경 preflight PASS
 
 기존 수동 전용/TODO 정책은 소유자의 새 원격화 요청으로 대체됐다.
