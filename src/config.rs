@@ -632,13 +632,16 @@ pub struct AppConfig {
     #[serde(default)]
     pub inject_force_focus_without_tap: bool,
     /// When a media tap client connects to a real (HU-advertised) video channel
-    /// such as video-main, send the phone an unsolicited VIDEO_FOCUS_NOTIFICATION
-    /// native→projected toggle so it emits a fresh IDR right away, instead of the
-    /// client waiting for the phone's next natural keyframe (~60 s observed).
-    /// Same mechanism already used for injected displays. The real HU may see a
-    /// stream restart (fresh IDR) on that channel.
-    #[serde(default = "default_true")]
-    pub media_tap_main_keyframe_toggle: bool,
+    /// (main, cluster or auxiliary), send the phone an unsolicited
+    /// VIDEO_FOCUS_NOTIFICATION native→projected toggle so it emits a fresh IDR
+    /// right away, instead of the client waiting for the phone's next natural
+    /// keyframe (~60 s observed). Same mechanism already used for injected
+    /// displays, but here the real head unit is also showing that stream, so it
+    /// may see a brief stream restart (flicker/black frame). Skipped while the HU
+    /// itself holds NATIVE focus, and rate-limited per channel.
+    /// Experimental, tested on a single HU. Default: false.
+    #[serde(default)]
+    pub media_tap_keyframe_toggle: bool,
     pub change_usb_order: bool,
     pub stop_on_disconnect: bool,
     pub waze_lht_workaround: bool,
@@ -653,6 +656,10 @@ pub struct AppConfig {
     pub ev_connector_types: EvConnectorTypes,
     pub enable_ssh: bool,
     pub usb_serial_console: bool,
+    /// Migrate saved legacy 11g/channel-6 defaults if 5 GHz channel 36 is supported.
+    /// Set false to retain an intentionally chosen old 2.4 GHz profile.
+    #[serde(default = "default_true")]
+    pub wifi_legacy_5ghz_autofix: bool,
     pub wifi_version: u16,
     pub band: String,
     pub country_code: String,
@@ -1067,7 +1074,7 @@ impl Default for AppConfig {
             inject_aux_touch_width: 1280,
             inject_aux_touch_height: 720,
             inject_force_focus_without_tap: false,
-            media_tap_main_keyframe_toggle: true,
+            media_tap_keyframe_toggle: false,
             change_usb_order: false,
             stop_on_disconnect: false,
             waze_lht_workaround: false,
@@ -1077,6 +1084,7 @@ impl Default for AppConfig {
             ev_connector_types: EvConnectorTypes::default(),
             enable_ssh: true,
             usb_serial_console: false,
+            wifi_legacy_5ghz_autofix: true,
             wifi_version: get_latest_wifi_version_from(&iw_cache).unwrap_or(1),
             band: if supports_5ghz_wifi_cached(&iw_cache) {
                 // Eventually: Add check for 6 GHz
@@ -1262,7 +1270,22 @@ impl AppConfig {
             return Err(Box::new(e));
         }
 
-        Ok(file_config.unwrap())
+        let mut config: Self = file_config.unwrap();
+        if config.wifi_legacy_5ghz_autofix
+            && config.band == "2.4"
+            && config.channel == 6
+            && config.wifi_version <= 3
+            && iw_list_output()
+                .map(|iw| iw_has_freq_in_range(&iw, 5180..=5180))
+                .unwrap_or(false)
+        {
+            // Recover the exact legacy CS317 saved auto-default, never arbitrary
+            // manually selected channels or a modern 802.11n 2.4 GHz profile.
+            config.band = "5".to_string();
+            config.channel = 36;
+            config.wifi_version = 5;
+        }
+        Ok(config)
     }
 
     pub fn save(&self, config_file: PathBuf) {
@@ -1420,7 +1443,7 @@ impl AppConfig {
         doc["inject_aux_touch_width"] = value(self.inject_aux_touch_width as i64);
         doc["inject_aux_touch_height"] = value(self.inject_aux_touch_height as i64);
         doc["inject_force_focus_without_tap"] = value(self.inject_force_focus_without_tap);
-        doc["media_tap_main_keyframe_toggle"] = value(self.media_tap_main_keyframe_toggle);
+        doc["media_tap_keyframe_toggle"] = value(self.media_tap_keyframe_toggle);
         doc["change_usb_order"] = value(self.change_usb_order);
         doc["stop_on_disconnect"] = value(self.stop_on_disconnect);
         doc["waze_lht_workaround"] = value(self.waze_lht_workaround);
@@ -1431,6 +1454,7 @@ impl AppConfig {
         doc["ev_connector_types"] = value(self.ev_connector_types.to_string());
         doc["enable_ssh"] = value(self.enable_ssh);
         doc["usb_serial_console"] = value(self.usb_serial_console);
+        doc["wifi_legacy_5ghz_autofix"] = value(self.wifi_legacy_5ghz_autofix);
         doc["wifi_version"] = value(self.wifi_version as i64);
         doc["band"] = value(self.band.to_string());
         doc["country_code"] = value(&self.country_code);
