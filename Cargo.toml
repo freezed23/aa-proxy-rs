@@ -102,3 +102,6 @@ strip = true      # Automatically strips symbols and debug info
 lto = true        # Optional: Enables Link-Time Optimization for even smaller binaries
 codegen-units = 1 # Optional: Reduces parallel code generation, allowing better optimization
 panic = "abort"   # Removes unwinding machinery for smaller, slightly faster binaries
+
+[dev-dependencies]
+tempfile = "=3.27.0"

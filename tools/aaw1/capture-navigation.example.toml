@@ -1,0 +1,17 @@
+# Requires a successfully decoded SDR. Actual service IDs come from that SDR.
+# This does not presume ch9 or a protocol version and is not auto-loaded.
+pkt_debug = true
+pkt_debug_filter_enabled = true
+hexdump_level = "All"
+pkt_debug_full_frame_enabled = true
+pkt_debug_filter_proxy = "both"
+pkt_debug_filter_stages = "decrypted_input"
+pkt_debug_filter_channels = ""
+pkt_debug_filter_service_kinds = "control,navigation_status"
+pkt_debug_filter_exclude_channels = ""
+pkt_debug_filter_exclude_message_ids = ""
+pkt_debug_filter_message_ids = "0x0006,0x0007,0x0008,0x0009,0x000D,0x000E,0x000F,0x0010,0x001A,0x00FF,0x8001,0x8002,0x8003,0x8004,0x8005,0x8006,0x8007,0x8008"
+pkt_debug_filter_pretty_proto = true
+pkt_debug_filter_max_payload_bytes = 16384
+pkt_debug_capture_dir = ""
+# Enable private packet files explicitly if full PNG bytes beyond the hex cap are needed.

@@ -2163,13 +2163,9 @@ async fn run_wifi_join_custom_cmd(
         );
         Ok(())
     } else {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "Wi-Fi join command failed status={} stdout={} stderr={}",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
+        Err(crate::diagnostic_privacy::wifi_command_failure(
+            "custom Wi-Fi join",
+            &output.status.to_string(),
         )
         .into())
     }
@@ -2244,15 +2240,10 @@ async fn run_nmcli_wifi_join(
     if output.status.success() {
         Ok(())
     } else {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "nmcli failed status={} stdout={} stderr={}",
-            output.status,
-            stdout.trim(),
-            stderr.trim()
+        Err(
+            crate::diagnostic_privacy::wifi_command_failure("nmcli", &output.status.to_string())
+                .into(),
         )
-        .into())
     }
 }
 
@@ -2276,11 +2267,10 @@ async fn wpa_cli_output(iface: &str, args: &[&str]) -> Result<String> {
     if output.status.success() && !stdout.eq_ignore_ascii_case("FAIL") {
         Ok(stdout)
     } else {
-        Err(format!(
-            "wpa_cli {:?} failed status={} stdout={} stderr={}",
-            args, output.status, stdout, stderr
+        Err(
+            crate::diagnostic_privacy::wifi_command_failure("wpa_cli", &output.status.to_string())
+                .into(),
         )
-        .into())
     }
 }
 
@@ -2350,10 +2340,10 @@ async fn run_wpa_cli_wifi_join(
 fn wpactrl_cmd(client: &mut wpactrl::Client, cmd: &str) -> Result<String> {
     let response = client
         .request(cmd)
-        .map_err(|e| format!("wpactrl command {:?} failed: {}", cmd, e))?;
+        .map_err(|_| crate::diagnostic_privacy::wifi_control_failure(false))?;
     let trimmed = response.trim();
     if trimmed.eq_ignore_ascii_case("FAIL") {
-        Err(format!("wpactrl command {:?} returned FAIL", cmd).into())
+        Err(crate::diagnostic_privacy::wifi_control_failure(true).into())
     } else {
         Ok(response)
     }
@@ -2714,8 +2704,8 @@ async fn resolve_external_car_sta_iface(
 
 async fn run_shell_for_wifi(label: &str, command: &str, timeout_secs: u64) -> Result<()> {
     debug!(
-        "{} 🧪 bt-wireless-proxy car-wifi-mitm: running {}: {}",
-        NAME, label, command
+        "{} 🧪 bt-wireless-proxy car-wifi-mitm: running {} (command redacted)",
+        NAME, label
     );
     let output = timeout(
         Duration::from_secs(timeout_secs),
@@ -2725,16 +2715,10 @@ async fn run_shell_for_wifi(label: &str, command: &str, timeout_secs: u64) -> Re
     if output.status.success() {
         Ok(())
     } else {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!(
-            "{} failed status={} stdout={} stderr={}",
-            label,
-            output.status,
-            stdout.trim(),
-            stderr.trim()
+        Err(
+            crate::diagnostic_privacy::wifi_command_failure(label, &output.status.to_string())
+                .into(),
         )
-        .into())
     }
 }
 

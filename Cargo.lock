@@ -53,6 +53,7 @@ dependencies = [
  "shell-words",
  "simplelog",
  "tar",
+ "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",

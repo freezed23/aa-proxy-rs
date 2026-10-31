@@ -26,6 +26,7 @@ use crate::mitm_prettyprint::{
     pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PacketDebugServiceKind,
     PktDebugFullFrameBuffers,
 };
+use crate::packet_debug_config::PacketDebugConfig;
 use crate::sdr_ui;
 use crate::ssl::{AaConnection, SslMemBuf, TlsBackend};
 use crate::vendor_ext::{
@@ -140,6 +141,13 @@ pub struct MediaTapEndpointInfo {
 
 pub type SharedMediaTapEndpoints = Arc<RwLock<Vec<MediaTapEndpointInfo>>>;
 pub type SharedCompanionIp = Arc<RwLock<Option<IpAddr>>>;
+
+async fn refresh_packet_debug(snapshot: &mut PacketDebugConfig, config: &SharedConfig) {
+    let latest = config.read().await;
+    if !snapshot.matches_app_config(&latest) {
+        *snapshot = PacketDebugConfig::from(&*latest);
+    }
+}
 
 // message related constants:
 pub const HEADER_LENGTH: usize = 4;
@@ -4252,7 +4260,8 @@ pub async fn proxy<D: IoDeviceTrait>(
 ) -> Result<()> {
     let cfg = config.read().await.clone();
     let passthrough = !cfg.mitm || cfg.runtime_mitm_failed;
-    let hex_requested = cfg.hexdump_level;
+    let mut debug_cfg = PacketDebugConfig::from(&cfg);
+    let hex_requested = debug_cfg.hexdump_level;
 
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
     if passthrough {
@@ -4260,9 +4269,11 @@ pub async fn proxy<D: IoDeviceTrait>(
             tokio::select! {
             // handling data from opposite device's thread, which needs to be transmitted
             Some(mut pkt) = rx.recv() => {
+                refresh_packet_debug(&mut debug_cfg, &config).await;
+                let hex_requested = debug_cfg.hexdump_level;
                 debug!("{} rx.recv", get_name(proxy_type));
                 maybe_override_raw_control_protocol_version(proxy_type, "passthrough rx -> endpoint", &mut pkt, &cfg);
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, None).await;
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &debug_cfg, None).await;
 
                 pkt.transmit(&mut device)
                     .await
@@ -4275,9 +4286,11 @@ pub async fn proxy<D: IoDeviceTrait>(
 
             // handling input data from the reader thread
             Some(mut pkt) = rxr.recv() => {
+                refresh_packet_debug(&mut debug_cfg, &config).await;
+                let hex_requested = debug_cfg.hexdump_level;
                 debug!("{} rxr.recv", get_name(proxy_type));
                 maybe_override_raw_control_protocol_version(proxy_type, "passthrough endpoint -> tx", &mut pkt, &cfg);
-                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, None).await;
+                let _ = pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &debug_cfg, None).await;
 
                 tx.send(pkt).await?;
             }
@@ -4314,7 +4327,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             HexdumpLevel::DecryptedInput, // the packet is not encrypted
             hex_requested,
             &pkt,
-            &cfg,
+            &debug_cfg,
             None,
         )
         .await;
@@ -4329,7 +4342,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             HexdumpLevel::RawOutput,
             hex_requested,
             &pkt,
-            &cfg,
+            &debug_cfg,
             None,
         )
         .await;
@@ -4346,7 +4359,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                 HexdumpLevel::RawInput,
                 hex_requested,
                 &pkt,
-                &cfg,
+                &debug_cfg,
                 None,
             )
             .await;
@@ -4386,7 +4399,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                     HexdumpLevel::RawOutput,
                     hex_requested,
                     &pkt,
-                    &cfg,
+                    &debug_cfg,
                     None,
                 )
                 .await;
@@ -4413,7 +4426,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             HexdumpLevel::RawOutput,
             hex_requested,
             &pkt,
-            &cfg,
+            &debug_cfg,
             None,
         )
         .await;
@@ -4433,7 +4446,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             HexdumpLevel::DecryptedInput, // the packet is not encrypted
             hex_requested,
             &pkt,
-            &cfg,
+            &debug_cfg,
             None,
         )
         .await;
@@ -4478,7 +4491,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                     HexdumpLevel::RawOutput,
                     hex_requested,
                     &pkt,
-                    &cfg,
+                    &debug_cfg,
                     None,
                 )
                 .await;
@@ -4495,7 +4508,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                 HexdumpLevel::RawInput,
                 hex_requested,
                 &pkt,
-                &cfg,
+                &debug_cfg,
                 None,
             )
             .await;
@@ -4563,6 +4576,8 @@ pub async fn proxy<D: IoDeviceTrait>(
         tokio::select! {
         // handling data from opposite device's thread, which needs to be transmitted
         Some(mut pkt) = rx.recv() => {
+                refresh_packet_debug(&mut debug_cfg, &config).await;
+                let hex_requested = debug_cfg.hexdump_level;
             if proxy_type == ProxyType::HeadUnit {
                 maybe_emit_pending_injected_focus(proxy_type, &mut ctx, &cfg, &tx)?;
             }
@@ -4692,7 +4707,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                 HexdumpLevel::DecryptedOutput,
                 hex_requested,
                 &pkt,
-                &cfg,
+                &debug_cfg,
                 &mut ctx,
             )
             .await;
@@ -4731,7 +4746,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                 PacketAction::Forward => {
                     pkt.encrypt_payload(&mut mem_buf, &mut ssl_conn).await?;
                     let _ =
-                        pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
+                        pkt_debug(proxy_type, HexdumpLevel::RawOutput, hex_requested, &pkt, &debug_cfg, Some(&ctx.debug_channel_kinds)).await;
                     ssl_trace_record_packet(
                         proxy_type,
                         "raw->endpoint",
@@ -4762,7 +4777,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                             HexdumpLevel::DecryptedOutput,
                             hex_requested,
                             &out_pkt,
-                            &cfg,
+                            &debug_cfg,
                             &mut ctx,
                         )
                         .await;
@@ -4782,7 +4797,7 @@ pub async fn proxy<D: IoDeviceTrait>(
                             HexdumpLevel::RawOutput,
                             hex_requested,
                             &out_pkt,
-                            &cfg,
+                            &debug_cfg,
                             Some(&ctx.debug_channel_kinds),
                         )
                         .await;
@@ -4810,7 +4825,9 @@ pub async fn proxy<D: IoDeviceTrait>(
 
         // handling input data from the reader thread
         Some(mut pkt) = rxr.recv() => {
-            let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt, &cfg, Some(&ctx.debug_channel_kinds)).await;
+                refresh_packet_debug(&mut debug_cfg, &config).await;
+                let hex_requested = debug_cfg.hexdump_level;
+            let _ = pkt_debug(proxy_type, HexdumpLevel::RawInput, hex_requested, &pkt, &debug_cfg, Some(&ctx.debug_channel_kinds)).await;
             ssl_trace_record_packet(
                 proxy_type,
                 "raw<-endpoint",
@@ -4833,6 +4850,16 @@ pub async fn proxy<D: IoDeviceTrait>(
                         &mut ssl_trace_media_throttle,
                         false,
                     );
+                    // Original decrypted ingress: capture before any WASM/SDR mutation.
+                    let _ = pkt_debug_with_full_frame(
+                        proxy_type,
+                        HexdumpLevel::DecryptedInput,
+                        hex_requested,
+                        &pkt,
+                        &debug_cfg,
+                        &mut ctx,
+                    )
+                    .await;
                     let action = pkt_modify_hook(
                         proxy_type,
                         PacketFlow::FromEndpoint,
@@ -4850,15 +4877,6 @@ pub async fn proxy<D: IoDeviceTrait>(
                         ws_event_tx.clone(),
                     )
                     .await?;
-                    let _ = pkt_debug_with_full_frame(
-                        proxy_type,
-                        HexdumpLevel::DecryptedInput,
-                        hex_requested,
-                        &pkt,
-                        &cfg,
-                        &mut ctx,
-                    )
-                    .await;
                     match action {
                         PacketAction::Drop => {}
                         PacketAction::SendBack => {

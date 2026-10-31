@@ -5,8 +5,8 @@ use crate::companion_protocol::{
     COMPANION_OP_REST_CALL_RESULT, COMPANION_OP_REST_CALL_SYNC, COMPANION_OP_STATUS,
     COMPANION_OP_SUBSCRIBE_TOPIC_EVENT, COMPANION_OP_UNSUBSCRIBE_TOPIC_EVENT,
 };
-use crate::config::AppConfig;
 use crate::config_types::HexdumpLevel;
+use crate::debug_capture::{self, MAX_MESSAGE_BYTES};
 use crate::mitm::protos::ControlMessageType;
 use crate::mitm::protos::ControlMessageType::*;
 use crate::mitm::protos::*;
@@ -14,10 +14,21 @@ use crate::mitm::{
     get_name, ModifyContext, Packet, ProxyType, Result, FRAME_TYPE_FIRST, FRAME_TYPE_LAST,
     FRAME_TYPE_MASK,
 };
+use crate::packet_debug_config::PacketDebugConfig;
 use log::{debug, info, log_enabled, Level};
 use protobuf::text_format::print_to_string_pretty;
 use protobuf::{Enum, Message};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+const MAX_FULL_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_FULL_FRAME_STREAMS: usize = 32;
+const MAX_FULL_FRAME_FRAGMENTS: usize = 128;
+const FULL_FRAME_TTL: Duration = Duration::from_secs(3);
+const MAX_HEX_BYTES: usize = 16 * 1024;
+const MAX_PRETTY_INPUT_BYTES: usize = 16 * 1024;
+const MAX_PRETTY_TEXT_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum PacketDebugServiceKind {
@@ -96,6 +107,8 @@ pub(crate) struct PktDebugFullFrameBuffer {
     service_kind: PacketDebugServiceKind,
     payload: Vec<u8>,
     fragment_count: usize,
+    started: Instant,
+    debug_config: PacketDebugConfig,
 }
 
 pub(crate) type PktDebugFullFrameBuffers = HashMap<PktDebugFullFrameKey, PktDebugFullFrameBuffer>;
@@ -141,22 +154,23 @@ fn pkt_debug_maybe_full_frame(
     hexdump: HexdumpLevel,
     hex_requested: HexdumpLevel,
     pkt: &Packet,
-    cfg: &AppConfig,
+    cfg: &PacketDebugConfig,
     debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
     buffers: &mut PktDebugFullFrameBuffers,
 ) -> Result<()> {
-    if !cfg.pkt_debug_full_frame_enabled || !pkt_debug_full_frame_supported_stage(hexdump) {
+    let now = Instant::now();
+    // Expiry/settings changes are checked on every observed packet. Even while
+    // idle, allocations are bounded to MAX_FULL_FRAME_BYTES across all streams.
+    buffers
+        .retain(|_, b| now.duration_since(b.started) <= FULL_FRAME_TTL && b.debug_config == *cfg);
+    if !cfg.pkt_debug_full_frame_enabled || (!cfg.pkt_debug && !log_enabled!(Level::Debug)) {
+        buffers.clear();
         return Ok(());
     }
-
+    if !pkt_debug_full_frame_supported_stage(hexdump) || hex_requested < hexdump {
+        return Ok(());
+    }
     let standalone_pkt_debug = cfg.pkt_debug;
-    if !standalone_pkt_debug && !log_enabled!(Level::Debug) {
-        return Ok(());
-    }
-
-    if hex_requested < hexdump {
-        return Ok(());
-    }
 
     let frame_type = pkt.flags & FRAME_TYPE_MASK;
     let key = pkt_debug_full_frame_key(proxy_type, hexdump, pkt);
@@ -180,6 +194,25 @@ fn pkt_debug_maybe_full_frame(
             return Ok(());
         }
 
+        let total: usize = buffers.values().map(|b| b.payload.len()).sum();
+        let valid_length = pkt
+            .final_length
+            .map(|n| n as usize)
+            .filter(|n| *n >= pkt.payload.len() && *n <= MAX_MESSAGE_BYTES);
+        if valid_length.is_none()
+            || pkt.payload.len() > MAX_MESSAGE_BYTES
+            || total.saturating_add(pkt.payload.len()) > MAX_FULL_FRAME_BYTES
+            || buffers.len() >= MAX_FULL_FRAME_STREAMS
+        {
+            pkt_debug_emit_line(
+                standalone_pkt_debug,
+                format!(
+                    "full-frame rejected channel={:#04x}: length/budget",
+                    pkt.channel
+                ),
+            );
+            return Ok(());
+        }
         buffers.insert(
             key,
             PktDebugFullFrameBuffer {
@@ -190,26 +223,65 @@ fn pkt_debug_maybe_full_frame(
                 service_kind,
                 payload: pkt.payload.clone(),
                 fragment_count: 1,
+                started: now,
+                debug_config: cfg.clone(),
             },
         );
         return Ok(());
     }
 
-    let Some(buffer) = buffers.get_mut(&key) else {
+    let total: usize = buffers.values().map(|b| b.payload.len()).sum();
+    let Some(buffer) = buffers.get(&key) else {
         return Ok(());
     };
-
-    // MIDDLE and LAST fragments are raw continuation bytes. Append them to the
-    // FIRST fragment captured above; forwarding has already happened elsewhere
-    // and is never delayed by this passive logger.
+    let new_len = buffer.payload.len().saturating_add(pkt.payload.len());
+    if (pkt.flags & !FRAME_TYPE_MASK) != buffer.base_flags
+        || pkt.payload.is_empty()
+        || buffer.fragment_count >= MAX_FULL_FRAME_FRAGMENTS
+        || new_len > MAX_MESSAGE_BYTES
+        || total.saturating_add(pkt.payload.len()) > MAX_FULL_FRAME_BYTES
+        || buffer
+            .expected_len
+            .map(|n| new_len > n as usize)
+            .unwrap_or(true)
+    {
+        buffers.remove(&key);
+        pkt_debug_emit_line(
+            standalone_pkt_debug,
+            format!(
+                "full-frame rejected channel={:#04x}: continuation/length/budget",
+                pkt.channel
+            ),
+        );
+        return Ok(());
+    }
+    let buffer = buffers.get_mut(&key).expect("checked above");
+    if buffer.payload.try_reserve_exact(pkt.payload.len()).is_err() {
+        buffers.remove(&key);
+        pkt_debug_emit_line(
+            standalone_pkt_debug,
+            "full-frame rejected: allocation budget".into(),
+        );
+        return Ok(());
+    }
     buffer.payload.extend_from_slice(&pkt.payload);
-    buffer.fragment_count = buffer.fragment_count.saturating_add(1);
+    buffer.fragment_count += 1;
 
     if frame_type != FRAME_TYPE_LAST {
         return Ok(());
     }
 
     let buffer = buffers.remove(&key).expect("buffer existed above");
+    if buffer.expected_len != Some(buffer.payload.len() as u32) {
+        pkt_debug_emit_line(
+            standalone_pkt_debug,
+            format!(
+                "full-frame rejected channel={:#04x}: final length mismatch",
+                pkt.channel
+            ),
+        );
+        return Ok(());
+    }
     let full_pkt = Packet {
         channel: buffer.channel,
         flags: buffer.base_flags | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
@@ -217,6 +289,14 @@ fn pkt_debug_maybe_full_frame(
         payload: buffer.payload,
     };
 
+    maybe_capture_original(
+        proxy_type,
+        hexdump,
+        &full_pkt,
+        buffer.message_id,
+        buffer.service_kind,
+        cfg,
+    );
     let message_name = message_name_for_kind(buffer.service_kind, buffer.message_id, &full_pkt);
     pkt_debug_emit_line(
         standalone_pkt_debug,
@@ -232,6 +312,16 @@ fn pkt_debug_maybe_full_frame(
         ),
     );
 
+    if matches!(
+        buffer.service_kind,
+        PacketDebugServiceKind::Bluetooth | PacketDebugServiceKind::WifiProjection
+    ) {
+        pkt_debug_emit_line(
+            standalone_pkt_debug,
+            "full-frame payload omitted (credential-bearing service)".into(),
+        );
+        return Ok(());
+    }
     let max_payload_bytes = Some(cfg.pkt_debug_filter_max_payload_bytes);
     pkt_debug_emit_line(
         standalone_pkt_debug,
@@ -492,7 +582,7 @@ fn pkt_debug_filter_matches(
     pkt: &Packet,
     message_id: u16,
     service_kind: PacketDebugServiceKind,
-    cfg: &AppConfig,
+    cfg: &PacketDebugConfig,
 ) -> bool {
     if !cfg.pkt_debug_filter_enabled {
         return true;
@@ -543,10 +633,12 @@ fn pkt_debug_filter_matches(
 
 fn format_packet_for_debug(pkt: &Packet, max_payload_bytes: Option<usize>) -> String {
     let payload_len = pkt.payload.len();
-    let shown_len = max_payload_bytes
-        .filter(|max| *max > 0)
-        .map(|max| payload_len.min(max))
-        .unwrap_or(payload_len);
+    let shown_len = payload_len.min(
+        max_payload_bytes
+            .filter(|n| *n > 0)
+            .unwrap_or(MAX_HEX_BYTES)
+            .min(MAX_HEX_BYTES),
+    );
     let truncated = shown_len < payload_len;
 
     let mut out = String::new();
@@ -815,9 +907,17 @@ fn pretty_parse_error(type_name: &str, err: protobuf::Error) -> String {
 
 macro_rules! parse_pretty_message {
     ($ty:ty, $data:expr) => {{
-        match <$ty>::parse_from_bytes($data) {
-            Ok(msg) => Some(print_to_string_pretty(&msg)),
-            Err(e) => Some(pretty_parse_error(stringify!($ty), e)),
+        if $data.len() > MAX_PRETTY_INPUT_BYTES {
+            Some(format!(
+                "pretty omitted: {} bytes sha256={}",
+                $data.len(),
+                hex::encode(Sha256::digest($data))
+            ))
+        } else {
+            match <$ty>::parse_from_bytes($data) {
+                Ok(msg) => Some(print_to_string_pretty(&msg)),
+                Err(e) => Some(pretty_parse_error(stringify!($ty), e)),
+            }
         }
     }};
 }
@@ -959,34 +1059,6 @@ fn pretty_input_message(message_id: u16, data: &[u8]) -> Option<String> {
     }
 }
 
-fn pretty_bluetooth_message(message_id: u16, data: &[u8]) -> Option<String> {
-    match BluetoothMessageId::from_i32(message_id.into())? {
-        BluetoothMessageId::BLUETOOTH_MESSAGE_PAIRING_REQUEST => {
-            parse_pretty_message!(BluetoothPairingRequest, data)
-        }
-        BluetoothMessageId::BLUETOOTH_MESSAGE_PAIRING_RESPONSE => {
-            parse_pretty_message!(BluetoothPairingResponse, data)
-        }
-        BluetoothMessageId::BLUETOOTH_MESSAGE_AUTHENTICATION_DATA => {
-            parse_pretty_message!(BluetoothAuthenticationData, data)
-        }
-        BluetoothMessageId::BLUETOOTH_MESSAGE_AUTHENTICATION_RESULT => {
-            parse_pretty_message!(BluetoothAuthenticationResult, data)
-        }
-    }
-}
-
-fn pretty_wifi_message(message_id: u16, data: &[u8]) -> Option<String> {
-    match WifiProjectionMessageId::from_i32(message_id.into())? {
-        WifiProjectionMessageId::WIFI_MESSAGE_CREDENTIALS_REQUEST => {
-            parse_pretty_message!(WifiCredentialsRequest, data)
-        }
-        WifiProjectionMessageId::WIFI_MESSAGE_CREDENTIALS_RESPONSE => {
-            parse_pretty_message!(WifiCredentialsResponse, data)
-        }
-    }
-}
-
 fn pretty_radio_message(message_id: u16, data: &[u8]) -> Option<String> {
     match RadioMessageId::from_i32(message_id.into())? {
         RadioMessageId::RADIO_MESSAGE_ACTIVE_RADIO_NOTIFICATION => {
@@ -1079,7 +1151,21 @@ fn pretty_navigation_status_message(message_id: u16, data: &[u8]) -> Option<Stri
             parse_pretty_message!(NavigationStatus, data)
         }
         NavigationStatusMessageId::INSTRUMENT_CLUSTER_NAVIGATION_TURN_EVENT => {
-            parse_pretty_message!(NavigationNextTurnEvent, data)
+            if data.len() > MAX_MESSAGE_BYTES {
+                return Some("NAV TURN_EVENT exceeds diagnostic message limit".into());
+            }
+            match NavigationNextTurnEvent::parse_from_bytes(data) {
+                Ok(mut msg) => {
+                    let image = msg.take_image();
+                    let summary = format!(
+                        "image_summary: bytes={} sha256={}",
+                        image.len(),
+                        hex::encode(Sha256::digest(&image))
+                    );
+                    Some(format!("{}\n{}", print_to_string_pretty(&msg), summary))
+                }
+                Err(e) => Some(pretty_parse_error("NavigationNextTurnEvent", e)),
+            }
         }
         NavigationStatusMessageId::INSTRUMENT_CLUSTER_NAVIGATION_DISTANCE_EVENT => {
             parse_pretty_message!(NavigationNextTurnDistanceEvent, data)
@@ -1198,7 +1284,7 @@ fn pretty_packet_message(
             pretty_media_message(message_id, data)
         }
         PacketDebugServiceKind::InputSource => pretty_input_message(message_id, data),
-        PacketDebugServiceKind::Bluetooth => pretty_bluetooth_message(message_id, data),
+        PacketDebugServiceKind::Bluetooth => Some("Bluetooth payload omitted (credentials)".into()),
         PacketDebugServiceKind::Radio => pretty_radio_message(message_id, data),
         PacketDebugServiceKind::NavigationStatus => {
             pretty_navigation_status_message(message_id, data)
@@ -1218,13 +1304,16 @@ fn pretty_packet_message(
         PacketDebugServiceKind::GenericNotification => {
             pretty_generic_notification_message(message_id, data)
         }
-        PacketDebugServiceKind::WifiProjection => pretty_wifi_message(message_id, data),
+        PacketDebugServiceKind::WifiProjection => {
+            Some("Wi-Fi payload omitted (credentials)".into())
+        }
         PacketDebugServiceKind::Unknown | PacketDebugServiceKind::CarProperty => None,
     }
 }
 
 fn wrap_pretty_block(title: &str, text: &str) -> String {
-    let trimmed = text.trim();
+    let bounded = bounded_text(text, MAX_PRETTY_TEXT_BYTES);
+    let trimmed = bounded.trim();
 
     if trimmed.is_empty() {
         return format!("\n{} {{}}", title);
@@ -1245,7 +1334,7 @@ pub async fn pkt_debug(
     hexdump: HexdumpLevel,
     hex_requested: HexdumpLevel,
     pkt: &Packet,
-    cfg: &AppConfig,
+    cfg: &PacketDebugConfig,
     debug_channel_kinds: Option<&HashMap<u8, PacketDebugServiceKind>>,
 ) -> Result<()> {
     // Keep packet debug independent from global debug logging.
@@ -1290,6 +1379,19 @@ pub async fn pkt_debug(
         service_kind.as_str()
     ));
 
+    let credential_payload = matches!(
+        service_kind,
+        PacketDebugServiceKind::Bluetooth | PacketDebugServiceKind::WifiProjection
+    );
+    if credential_payload {
+        emit_pkt_debug("payload omitted (credential-bearing service)".into());
+        return Ok(());
+    }
+    if hexdump == HexdumpLevel::DecryptedInput
+        && (pkt.flags & FRAME_TYPE_MASK) == (FRAME_TYPE_FIRST | FRAME_TYPE_LAST)
+    {
+        maybe_capture_original(proxy_type, hexdump, pkt, message_id, service_kind, cfg);
+    }
     if hex_requested >= hexdump {
         let max_payload_bytes = if cfg.pkt_debug_filter_enabled {
             Some(cfg.pkt_debug_filter_max_payload_bytes)
@@ -1308,6 +1410,11 @@ pub async fn pkt_debug(
         return Ok(());
     }
 
+    if !pkt_debug_full_frame_supported_stage(hexdump)
+        || (pkt.flags & FRAME_TYPE_MASK) != (FRAME_TYPE_FIRST | FRAME_TYPE_LAST)
+    {
+        return Ok(());
+    }
     // parsing data
     let data = &pkt.payload[2..]; // start of message data
     if let Some(pretty) = pretty_packet_message(service_kind, control, message_id, data, pkt) {
@@ -1322,7 +1429,7 @@ pub async fn pkt_debug_with_full_frame(
     hexdump: HexdumpLevel,
     hex_requested: HexdumpLevel,
     pkt: &Packet,
-    cfg: &AppConfig,
+    cfg: &PacketDebugConfig,
     ctx: &mut ModifyContext,
 ) -> Result<()> {
     pkt_debug_maybe_full_frame(
@@ -1344,4 +1451,282 @@ pub async fn pkt_debug_with_full_frame(
         Some(&ctx.debug_channel_kinds),
     )
     .await
+}
+
+fn bounded_text(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        return text.to_string();
+    }
+    let mut end = limit;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!(
+        "{}\n... pretty text truncated ({} bytes)",
+        &text[..end],
+        text.len()
+    )
+}
+
+fn maybe_capture_original(
+    proxy: ProxyType,
+    stage: HexdumpLevel,
+    pkt: &Packet,
+    id: u16,
+    kind: PacketDebugServiceKind,
+    cfg: &PacketDebugConfig,
+) {
+    if stage != HexdumpLevel::DecryptedInput {
+        return;
+    }
+    let allowed = (pkt.channel == 0 && id == MESSAGE_SERVICE_DISCOVERY_RESPONSE as u16)
+        || (kind == PacketDebugServiceKind::NavigationStatus && (0x8001..=0x8008).contains(&id));
+    if allowed {
+        debug_capture::enqueue(
+            &cfg.pkt_debug_capture_dir,
+            if proxy == ProxyType::HeadUnit {
+                "HU"
+            } else {
+                "MD"
+            },
+            pkt.channel,
+            id,
+            &pkt.payload,
+        );
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn settings() -> PacketDebugConfig {
+        PacketDebugConfig {
+            pkt_debug: true,
+            hexdump_level: HexdumpLevel::All,
+            pkt_debug_full_frame_enabled: true,
+            pkt_debug_filter_enabled: true,
+            pkt_debug_filter_channels: "9".into(),
+            pkt_debug_filter_message_ids: "0x8004".into(),
+            pkt_debug_filter_pretty_proto: false,
+            ..Default::default()
+        }
+    }
+
+    fn feed(
+        buffers: &mut PktDebugFullFrameBuffers,
+        cfg: &PacketDebugConfig,
+        flags: u8,
+        length: Option<u32>,
+        bytes: &[u8],
+    ) {
+        let pkt = Packet {
+            channel: 9,
+            flags,
+            final_length: length,
+            payload: bytes.to_vec(),
+        };
+        pkt_debug_maybe_full_frame(
+            ProxyType::MobileDevice,
+            HexdumpLevel::DecryptedInput,
+            HexdumpLevel::All,
+            &pkt,
+            cfg,
+            None,
+            buffers,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn continuation_bytes_are_joined_without_reapplying_message_id_filter() {
+        let mut buffers = HashMap::new();
+        let cfg = settings();
+        feed(
+            &mut buffers,
+            &cfg,
+            FRAME_TYPE_FIRST,
+            Some(6),
+            &[0x80, 4, 0xaa],
+        );
+        feed(&mut buffers, &cfg, 0, None, &[0xbb, 0xcc]);
+        assert_eq!(
+            buffers.values().next().unwrap().payload,
+            [0x80, 4, 0xaa, 0xbb, 0xcc]
+        );
+        feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[0xdd]);
+        assert!(buffers.is_empty());
+    }
+
+    #[test]
+    fn invalid_first_lengths_do_not_allocate_buffers() {
+        for length in [None, Some(1), Some(MAX_MESSAGE_BYTES as u32 + 1)] {
+            let mut buffers = HashMap::new();
+            feed(
+                &mut buffers,
+                &settings(),
+                FRAME_TYPE_FIRST,
+                length,
+                &[0x80, 4],
+            );
+            assert!(buffers.is_empty());
+        }
+    }
+
+    #[test]
+    fn overflow_mismatch_flags_timeout_and_live_changes_discard_partial_frames() {
+        for failure in 0..6 {
+            let mut buffers = HashMap::new();
+            let mut cfg = settings();
+            feed(&mut buffers, &cfg, FRAME_TYPE_FIRST, Some(5), &[0x80, 4]);
+            match failure {
+                0 => feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[1, 2, 3, 4]),
+                1 => feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[1]),
+                2 => feed(
+                    &mut buffers,
+                    &cfg,
+                    FRAME_TYPE_LAST | CONTROL_FLAG,
+                    None,
+                    &[1, 2, 3],
+                ),
+                3 => {
+                    buffers.values_mut().next().unwrap().started =
+                        Instant::now() - FULL_FRAME_TTL - Duration::from_millis(1);
+                    feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[1, 2, 3]);
+                }
+                4 => {
+                    cfg.pkt_debug_filter_channels = "10".into();
+                    feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[1, 2, 3]);
+                }
+                _ => {
+                    cfg.pkt_debug_full_frame_enabled = false;
+                    feed(&mut buffers, &cfg, FRAME_TYPE_LAST, None, &[1, 2, 3]);
+                }
+            }
+            assert!(buffers.is_empty(), "case {}", failure);
+        }
+    }
+
+    #[test]
+    fn fragment_count_and_aggregate_memory_are_bounded() {
+        let mut cfg = settings();
+        cfg.pkt_debug_filter_channels.clear();
+        let mut buffers = HashMap::new();
+        for channel in 1..=5 {
+            let pkt = Packet {
+                channel,
+                flags: FRAME_TYPE_FIRST,
+                final_length: Some(MAX_MESSAGE_BYTES as u32),
+                payload: vec![0x80; MAX_MESSAGE_BYTES - 1],
+            };
+            let mut pkt = pkt;
+            pkt.payload[1] = 4;
+            pkt_debug_maybe_full_frame(
+                ProxyType::MobileDevice,
+                HexdumpLevel::DecryptedInput,
+                HexdumpLevel::All,
+                &pkt,
+                &cfg,
+                None,
+                &mut buffers,
+            )
+            .unwrap();
+        }
+        assert_eq!(buffers.len(), 4);
+        assert!(buffers.values().map(|b| b.payload.len()).sum::<usize>() <= MAX_FULL_FRAME_BYTES);
+        buffers.clear();
+        feed(
+            &mut buffers,
+            &settings(),
+            FRAME_TYPE_FIRST,
+            Some(200),
+            &[0x80, 4],
+        );
+        buffers.values_mut().next().unwrap().fragment_count = MAX_FULL_FRAME_FRAGMENTS;
+        feed(&mut buffers, &settings(), 0, None, &[0]);
+        assert!(buffers.is_empty());
+    }
+
+    #[test]
+    fn navigation_png_is_summarized_without_losing_turn_fields() {
+        let mut msg = NavigationNextTurnEvent::new();
+        msg.set_road("synthetic road".into());
+        msg.set_image(vec![0xfe; 48 * 1024]);
+        msg.set_turn_number(3);
+        msg.set_turn_angle(90);
+        let bytes = msg.write_to_bytes().unwrap();
+        let text = pretty_navigation_status_message(0x8004, &bytes).unwrap();
+        assert!(text.contains("49152"));
+        assert!(text.contains("turn_number: 3"));
+        assert!(text.contains("turn_angle: 90"));
+        assert!(text.contains("sha256="));
+        assert!(text.len() < 1024);
+        assert_eq!(
+            NavigationNextTurnEvent::parse_from_bytes(&bytes)
+                .unwrap()
+                .image()
+                .len(),
+            48 * 1024
+        );
+    }
+
+    #[test]
+    fn oversized_pretty_and_unlimited_hex_requests_are_still_bounded() {
+        let text = wrap_pretty_block("proto", &"한".repeat(40_000));
+        assert!(text.len() < MAX_PRETTY_TEXT_BYTES + 200);
+        assert!(text.contains("truncated"));
+        let pkt = Packet {
+            channel: 9,
+            flags: 3,
+            final_length: None,
+            payload: vec![0xaa; 40_000],
+        };
+        for limit in [None, Some(0), Some(usize::MAX)] {
+            let dump = format_packet_for_debug(&pkt, limit);
+            assert!(dump.contains("truncated"));
+            assert!(dump.len() < MAX_HEX_BYTES * 5);
+        }
+    }
+
+    #[test]
+    fn control_lifecycle_and_semantic_nav_filter_keep_media_acks_out() {
+        let cfg = PacketDebugConfig {
+            pkt_debug_filter_enabled: true,
+            pkt_debug_filter_service_kinds: "control,navigation_status".into(),
+            pkt_debug_filter_message_ids: "0x0007,0x0008,0x000D,0x000E,0x00FF,0x8004".into(),
+            ..Default::default()
+        };
+        let pkt = Packet {
+            channel: 0,
+            flags: 3,
+            final_length: None,
+            payload: vec![0, 7],
+        };
+        for id in [7, 8, 13, 14, 255] {
+            assert!(pkt_debug_filter_matches(
+                ProxyType::HeadUnit,
+                HexdumpLevel::DecryptedInput,
+                &pkt,
+                id,
+                PacketDebugServiceKind::Control,
+                &cfg
+            ));
+        }
+        assert!(pkt_debug_filter_matches(
+            ProxyType::MobileDevice,
+            HexdumpLevel::DecryptedInput,
+            &pkt,
+            0x8004,
+            PacketDebugServiceKind::NavigationStatus,
+            &cfg
+        ));
+        assert!(!pkt_debug_filter_matches(
+            ProxyType::MobileDevice,
+            HexdumpLevel::DecryptedInput,
+            &pkt,
+            0x8004,
+            PacketDebugServiceKind::MediaSink,
+            &cfg
+        ));
+    }
 }

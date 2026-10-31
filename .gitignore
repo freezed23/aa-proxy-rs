@@ -2,3 +2,7 @@
 /target
 /output
 config.toml
+
+# Host diagnostic checks
+__pycache__/
+*.pyc

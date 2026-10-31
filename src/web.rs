@@ -2068,8 +2068,9 @@ async fn update_config_entry(
         {
             Ok(()) => {
                 info!(
-                    "{} WASM config entry updated: {} = {}",
-                    NAME, entry.key, entry.value
+                    "{} {}",
+                    NAME,
+                    crate::diagnostic_privacy::config_update_log(&entry.key)
                 );
                 (
                     StatusCode::OK,
@@ -2168,8 +2169,9 @@ async fn update_config_entry(
             crash::set_crash_dir(new_cfg.crash_dir.clone());
             *cfg = new_cfg;
             info!(
-                "{} Config entry updated: {} = {}",
-                NAME, entry.key, entry.value
+                "{} {}",
+                NAME,
+                crate::diagnostic_privacy::config_update_log(&entry.key)
             );
             (
                 StatusCode::OK,
@@ -2228,7 +2230,11 @@ async fn apply_wasm_config_values_from_root(
             .await
             .map_err(|err| format!("failed to update {key}: {err}"))?;
 
-        info!("{} WASM config entry updated: {} = {}", NAME, key, value);
+        info!(
+            "{} {}",
+            NAME,
+            crate::diagnostic_privacy::config_update_log(&key)
+        );
     }
 
     Ok(())
