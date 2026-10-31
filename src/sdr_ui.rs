@@ -1088,12 +1088,13 @@ fn vehicle_info_from_sdr(msg: &ServiceDiscoveryResponse) -> SdrUiVehicleInfo {
     }
 }
 
-fn first_non_empty(values: &[&str]) -> Option<String> {
+fn first_non_empty(values: &[&[u8]]) -> Option<String> {
     values.iter().find_map(|value| non_empty_string(value))
 }
 
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
+fn non_empty_string(value: &[u8]) -> Option<String> {
+    let text = crate::sdr_text::display_text(value);
+    let trimmed = text.trim();
     if trimmed.is_empty() {
         None
     } else {

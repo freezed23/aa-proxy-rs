@@ -458,6 +458,34 @@ struct ProxyFrameSniffer {
     buf: Vec<u8>,
 }
 
+fn proxy_frame_payload_for_log(message_id: u16, payload: &[u8]) -> String {
+    // WifiInfoResponse carries the WPA key. Redact even malformed frames rather
+    // than relying on a successful protobuf parse before suppressing raw hex.
+    if message_id == ProxyMessageId::WifiInfoResponse as u16 {
+        "<Wi-Fi credentials redacted>".to_string()
+    } else if payload.is_empty() {
+        "<empty>".to_string()
+    } else {
+        hex::encode(payload)
+    }
+}
+
+#[cfg(test)]
+mod credential_log_tests {
+    use super::*;
+
+    #[test]
+    fn wifi_response_payload_is_redacted_even_when_malformed() {
+        for payload in [b"synthetic-test-key".as_slice(), &[0xff], &[]] {
+            assert_eq!(
+                proxy_frame_payload_for_log(ProxyMessageId::WifiInfoResponse as u16, payload),
+                "<Wi-Fi credentials redacted>"
+            );
+        }
+        assert_eq!(proxy_frame_payload_for_log(1, &[0x08, 0x01]), "0801");
+    }
+}
+
 impl ProxyFrameSniffer {
     fn new(direction: &'static str) -> Self {
         Self {
@@ -497,11 +525,7 @@ impl ProxyFrameSniffer {
             message_id,
             ProxyMessageId::name(message_id),
             payload.len(),
-            if payload.is_empty() {
-                "<empty>".to_string()
-            } else {
-                hex::encode(payload)
-            }
+            proxy_frame_payload_for_log(message_id, payload)
         );
 
         match message_id {
@@ -6302,8 +6326,8 @@ impl Bluetooth {
 
         let mut info = WifiInfoResponse::new();
         info!(
-            "{} 🛜 Sending Host SSID and Password: {}, {}",
-            NAME, wifi_config.ssid, wifi_config.wpa_key
+            "{} 🛜 Sending Host Wi-Fi credentials (SSID and password redacted)",
+            NAME
         );
         info.set_ssid(wifi_config.ssid);
         info.set_key(wifi_config.wpa_key);

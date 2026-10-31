@@ -80,7 +80,7 @@ pub(crate) fn bt_add_real_hu_passthrough_service(
     };
 
     let mut bluetooth_service = BluetoothService::new();
-    bluetooth_service.set_car_address(car_address.to_ascii_uppercase());
+    bluetooth_service.set_car_address(car_address.to_ascii_uppercase().into_bytes());
     bluetooth_service
         .supported_pairing_methods
         .push(BluetoothPairingMethod::BLUETOOTH_PAIRING_NUMERIC_COMPARISON.into());
