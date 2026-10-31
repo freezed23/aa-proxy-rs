@@ -1,3 +1,5 @@
+
+> **OWNER CLARIFICATION (2026-10-31):** 테스트의 '모의주행'은 내비 자체 simulator로 확정된 것이 아니라 Android **Mock Location으로 GPS를 이동하는 시험**. 이 동안 연속 `0x8006/0x8007` 갱신은 아직 미검증. 한 시점의 일반 경로 안내 TBT 수신과 분리해 기록.
 ## 2026-10-31 Windows DHU NAVIGATIONSTATUS 벤치 성공 — 기존 빌드/런타임 상태 구분
 
 - **소유자 기존 AAW1 CS317 + Windows DHU 2.0-windows + Galaxy S23**: Zadig WinUSB로 USB `18D1:2D00` 드라이버 오류를 정리한 후 Android Auto 메인 화면 및 Instrument Cluster 표시 확인. DHU `instrumentcluster=true`, `navcluster=true`에서 `ServiceDiscoveryResponse`에 `navigation_status_service` 등장, 이번 세션 서비스 채널 `0x06`. `0x8003` ID, `0x8006` TURN_NORMAL_RIGHT=8/"교차로", `0x8007` 128m/32s/47km/2,836s/ETA20:51 복호화 Protobuf. **OWNER_DEVICE_OBSERVED: WINDOWS_DHU_BENCH**, 다른 HU/실차/장시간/차선/안내 종료/시뮬레이션 TBT는 아직 검증되지 않음.
