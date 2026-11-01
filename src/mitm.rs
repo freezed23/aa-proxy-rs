@@ -168,6 +168,8 @@ pub struct ModifyContext {
     pub(crate) sensor_channel: Option<u8>,
     pub(crate) sensors: Option<Vec<Sensor>>,
     pub(crate) nav_channel: Option<u8>,
+    /// Locally consumed modern navigation messages spanning transport fragments.
+    pub(crate) modern_nav_suppressed_channels: HashSet<u8>,
     pub(crate) audio_channels: Vec<u8>,
     pub(crate) ev_tx: Sender<EvTaskCommand>,
     pub(crate) input_channel: Option<u8>,
@@ -2004,6 +2006,51 @@ fn is_first_or_single_frame(pkt: &Packet) -> bool {
     frame_type == FRAME_TYPE_FIRST || frame_type == FRAME_TYPE_MASK
 }
 
+/// Return true when the packet belongs to a modern nav message consumed by
+/// the proxy. A new FIRST frame resets stale per-channel suppression state,
+/// and only the NavigationStatus channel learned from the SDR can be filtered.
+fn maybe_suppress_modern_nav_before_hu(
+    proxy_type: ProxyType,
+    flow: PacketFlow,
+    pkt: &Packet,
+    ctx: &mut ModifyContext,
+    cfg: &AppConfig,
+) -> bool {
+    if !cfg.modern_nav_drop_before_hu
+        || proxy_type != ProxyType::HeadUnit
+        || flow != PacketFlow::ToEndpoint
+        || ctx.nav_channel != Some(pkt.channel)
+    {
+        return false;
+    }
+
+    let frame_type = pkt.flags & FRAME_TYPE_MASK;
+    let first = frame_type == FRAME_TYPE_FIRST || frame_type == FRAME_TYPE_MASK;
+    let last = frame_type == FRAME_TYPE_LAST || frame_type == FRAME_TYPE_MASK;
+
+    if first {
+        ctx.modern_nav_suppressed_channels.remove(&pkt.channel);
+        let id = pkt.payload.get(0..2).map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+        if !matches!(id, Some(0x8006 | 0x8007)) {
+            return false;
+        }
+        if !last {
+            ctx.modern_nav_suppressed_channels.insert(pkt.channel);
+        }
+        info!(
+            "{} modern navigation consumed before legacy HU ch={:#04x} message={:#06x} first=true last={} bytes={}",
+            get_name(proxy_type), pkt.channel, id.unwrap_or(0), last, pkt.payload.len()
+        );
+        return true;
+    }
+
+    let suppressed = ctx.modern_nav_suppressed_channels.contains(&pkt.channel);
+    if suppressed && last {
+        ctx.modern_nav_suppressed_channels.remove(&pkt.channel);
+    }
+    suppressed
+}
+
 fn maybe_handle_override_induced_media_options(
     proxy_type: ProxyType,
     flow: PacketFlow,
@@ -2180,6 +2227,13 @@ pub async fn pkt_modify_hook(
     // if for some reason we have too small packet, bail out
     if pkt.payload.len() < 2 {
         return Ok(PacketAction::Forward);
+    }
+
+    // A legacy HU cannot parse modern NavigationState/CurrentPosition messages.
+    // Suppress the full fragmented message (not just its first frame). Keep
+    // cluster start/status, focus, H.264 and every other service untouched.
+    if maybe_suppress_modern_nav_before_hu(proxy_type, flow, pkt, ctx, cfg) {
+        return Ok(PacketAction::Drop);
     }
 
     // Remember the real HU's own video focus (HU -> phone) so the media tap keyframe
@@ -4522,6 +4576,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         sensors: None,
         input_channel: None,
         nav_channel: None,
+        modern_nav_suppressed_channels: HashSet::new(),
         audio_channels: vec![],
         ev_tx,
         hu_tx,
@@ -4968,6 +5023,7 @@ mod tests {
             sensor_channel: None,
             sensors: None,
             nav_channel: None,
+        modern_nav_suppressed_channels: HashSet::new(),
             audio_channels: vec![],
             ev_tx,
             input_channel: None,
@@ -5011,6 +5067,52 @@ mod tests {
             final_length,
             payload: payload.to_vec(),
         }
+    }
+
+    #[test]
+    fn modern_navigation_suppression_is_opt_in_and_channel_scoped() {
+        let mut ctx = test_ctx();
+        ctx.nav_channel = Some(9);
+        let mut cfg = AppConfig::default();
+        let modern = test_packet(9, FRAME_TYPE_MASK, None, &[0x80, 0x06, 0x0a, 0x00]);
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &modern, &mut ctx, &cfg));
+        cfg.modern_nav_drop_before_hu = true;
+        assert!(maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &modern, &mut ctx, &cfg));
+        let other = test_packet(10, FRAME_TYPE_MASK, None, &[0x80, 0x06]);
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &other, &mut ctx, &cfg));
+        let legacy = test_packet(9, FRAME_TYPE_MASK, None, &[0x80, 0x04]);
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &legacy, &mut ctx, &cfg));
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::MobileDevice, PacketFlow::FromEndpoint, &modern, &mut ctx, &cfg));
+    }
+
+    #[test]
+    fn modern_navigation_suppresses_all_fragments_then_recovers() {
+        let mut ctx = test_ctx();
+        ctx.nav_channel = Some(9);
+        let mut cfg = AppConfig::default();
+        cfg.modern_nav_drop_before_hu = true;
+        let start = test_packet(9, FRAME_TYPE_FIRST, Some(25), &[0x80, 0x07, 0x0a]);
+        let mid = test_packet(9, 0, None, &[0x01, 0x02]);
+        let end = test_packet(9, FRAME_TYPE_LAST, None, &[0x03]);
+        assert!(maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &start, &mut ctx, &cfg));
+        assert!(maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &mid, &mut ctx, &cfg));
+        assert!(maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &end, &mut ctx, &cfg));
+        assert!(!ctx.modern_nav_suppressed_channels.contains(&9));
+        let status = test_packet(9, FRAME_TYPE_MASK, None, &[0x80, 0x03]);
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &status, &mut ctx, &cfg));
+    }
+
+    #[test]
+    fn modern_navigation_new_start_clears_stale_suppression() {
+        let mut ctx = test_ctx();
+        ctx.nav_channel = Some(9);
+        let mut cfg = AppConfig::default();
+        cfg.modern_nav_drop_before_hu = true;
+        let start = test_packet(9, FRAME_TYPE_FIRST, None, &[0x80, 0x06]);
+        let next = test_packet(9, FRAME_TYPE_FIRST, None, &[0x80, 0x05]);
+        assert!(maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &start, &mut ctx, &cfg));
+        assert!(!maybe_suppress_modern_nav_before_hu(ProxyType::HeadUnit, PacketFlow::ToEndpoint, &next, &mut ctx, &cfg));
+        assert!(!ctx.modern_nav_suppressed_channels.contains(&9));
     }
 
     #[test]
