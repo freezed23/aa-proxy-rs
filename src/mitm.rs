@@ -4290,6 +4290,61 @@ fn build_control_reply_on_channel(
     }
 }
 
+/// The early version body has a fixed binary prefix, not a protobuf envelope.
+pub(crate) fn validate_version_packet(pkt: &Packet, response: bool) -> Result<()> {
+    let expected = if response { 2u16 } else { 1u16 };
+    let minimum = if response { 8 } else { 6 };
+    if pkt.channel != 0 || pkt.flags & ENCRYPTED != 0
+        || pkt.flags & FRAME_TYPE_MASK != FRAME_TYPE_MASK
+        || pkt.final_length.is_some() || pkt.payload.len() < minimum
+        || u16::from_be_bytes([pkt.payload[0], pkt.payload[1]]) != expected
+    {
+        return Err(format!("expected plaintext control VERSION_{}: channel={}, flags={:#04x}, length={}",
+            if response { "RESPONSE" } else { "REQUEST" }, pkt.channel, pkt.flags, pkt.payload.len()).into());
+    }
+    if response {
+        let status = u16::from_be_bytes([pkt.payload[6], pkt.payload[7]]);
+        if status != 0 {
+            return Err(format!("MD VERSION_RESPONSE rejected negotiation: status={status}").into());
+        }
+    }
+    Ok(())
+}
+
+async fn receive_version(rx: &mut Receiver<Packet>, response: bool, stage: &str) -> Result<Packet> {
+    let pkt = tokio::time::timeout(Duration::from_secs(15), rx.recv())
+        .await.map_err(|_| format!("{stage}: timed out before TLS"))?
+        .ok_or_else(|| format!("{stage}: transport closed before TLS"))?;
+    validate_version_packet(&pkt, response)?;
+    Ok(pkt)
+}
+
+pub(crate) async fn read_initial_version<D: IoDeviceTrait>(device: &mut D) -> Result<Packet> {
+    async fn read_exact<D: IoDeviceTrait>(device: &mut D, buf: &mut [u8]) -> Result<()> {
+        let mut offset = 0;
+        while offset < buf.len() {
+            let n = device.read_data(&mut buf[offset..]).await?;
+            if n == 0 { return Err("HU closed before complete VERSION_REQUEST".into()); }
+            offset += n;
+        }
+        Ok(())
+    }
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let mut header = [0u8; 4];
+        read_exact(device, &mut header).await?;
+        if header[0] != 0 || header[1] & ENCRYPTED != 0
+            || header[1] & FRAME_TYPE_MASK != FRAME_TYPE_MASK {
+            return Err("HU first frame is not an unfragmented plaintext control frame".into());
+        }
+        let mut payload = vec![0u8; u16::from_be_bytes([header[2], header[3]]) as usize];
+        read_exact(device, &mut payload).await?;
+        let pkt = Packet { channel: header[0], flags: header[1], final_length: None, payload };
+        validate_version_packet(&pkt, false)?;
+        info!("HU VERSION_REQUEST buffered; connecting fresh MD TCP session");
+        Ok(pkt)
+    }).await.map_err(|_| "HU VERSION_REQUEST timeout; MD TCP not opened")?
+}
+
 /// main thread doing all packet processing of an endpoint/device
 pub async fn proxy<D: IoDeviceTrait>(
     proxy_type: ProxyType,
@@ -4298,6 +4353,7 @@ pub async fn proxy<D: IoDeviceTrait>(
     tx: Sender<Packet>,
     mut rx: Receiver<Packet>,
     mut rxr: Receiver<Packet>,
+    initial_version: Option<Packet>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
@@ -4319,6 +4375,10 @@ pub async fn proxy<D: IoDeviceTrait>(
 
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
     if passthrough {
+        if let Some(mut pkt) = initial_version {
+            maybe_override_raw_control_protocol_version(proxy_type, "buffered HU -> MD", &mut pkt, &cfg);
+            tx.send(pkt).await?;
+        }
         loop {
             tokio::select! {
             // handling data from opposite device's thread, which needs to be transmitted
@@ -4374,7 +4434,12 @@ pub async fn proxy<D: IoDeviceTrait>(
     // for both HU and MD
     if proxy_type == ProxyType::HeadUnit {
         // waiting for initial version frame (HU is starting transmission)
-        let mut pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        let mut pkt = match initial_version {
+            Some(pkt) => pkt,
+            None => receive_version(&mut rxr, false, "HU VERSION_REQUEST").await?,
+        };
+        validate_version_packet(&pkt, false)?;
+        info!("{} VERSION_REQUEST received; forwarding to MD", get_name(proxy_type));
         maybe_override_raw_control_protocol_version(proxy_type, "HU rxr -> MD tx", &mut pkt, &cfg);
         let _ = pkt_debug(
             proxy_type,
@@ -4388,7 +4453,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         // sending to the MD
         tx.send(pkt).await?;
         // waiting for MD reply
-        let mut pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        let mut pkt = receive_version(&mut rx, true, "MD VERSION_RESPONSE relay").await?;
         maybe_override_raw_control_protocol_version(proxy_type, "MD rx -> HU tx", &mut pkt, &cfg);
         // sending reply back to the HU
         let _ = pkt_debug(
@@ -4467,7 +4532,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         }
     } else if proxy_type == ProxyType::MobileDevice {
         // expecting version request from the HU here...
-        let mut pkt = rx.recv().await.ok_or("rx channel hung up")?;
+        let mut pkt = receive_version(&mut rx, false, "HU VERSION_REQUEST relay").await?;
         maybe_override_raw_control_protocol_version(
             proxy_type,
             "HU rx -> MD endpoint",
@@ -4487,8 +4552,9 @@ pub async fn proxy<D: IoDeviceTrait>(
         pkt.transmit(&mut device)
             .await
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
+        info!("{} VERSION_REQUEST transmitted to MD; waiting for response", get_name(proxy_type));
         // waiting for MD reply
-        let mut pkt = rxr.recv().await.ok_or("reader channel hung up")?;
+        let mut pkt = receive_version(&mut rxr, true, "MD VERSION_RESPONSE").await?;
         maybe_override_raw_control_protocol_version(
             proxy_type,
             "MD endpoint -> HU tx",
@@ -4504,6 +4570,7 @@ pub async fn proxy<D: IoDeviceTrait>(
             None,
         )
         .await;
+        info!("{} VERSION_RESPONSE received; forwarding to HU", get_name(proxy_type));
         // sending reply back to the HU
         tx.send(pkt).await?;
 
@@ -5168,5 +5235,74 @@ mod tests {
             None
         );
         assert!(!ctx.media_fragments.contains_key(&0x21));
+    }
+}
+
+#[cfg(test)]
+mod version_startup_tests {
+    use super::*;
+
+    struct ShortReader { bytes: Vec<u8>, offset: usize, chunk: usize }
+    impl IoDeviceTrait for ShortReader {
+        async fn read_data(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = out.len().min(self.chunk).min(self.bytes.len() - self.offset);
+            out[..n].copy_from_slice(&self.bytes[self.offset..self.offset + n]);
+            self.offset += n;
+            Ok(n)
+        }
+        async fn write_data(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            panic!("version prefetch must never write to the HU")
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetch_handles_short_reads_without_consuming_next_frame() {
+        let request = vec![0, 3, 0, 6, 0, 1, 0, 1, 0, 7];
+        for chunk in 1..=request.len() {
+            let mut bytes = request.clone();
+            bytes.extend_from_slice(&[0, 3, 0, 2, 0, 3]);
+            let mut reader = ShortReader { bytes, offset: 0, chunk };
+            let pkt = read_initial_version(&mut reader).await.unwrap();
+            assert_eq!(pkt.payload, request[4..]);
+            assert_eq!(reader.offset, request.len());
+        }
+    }
+
+    #[tokio::test]
+    async fn prefetch_rejects_truncated_transport() {
+        for bytes in [vec![], vec![0, 3], vec![0, 3, 0, 6, 0, 1]] {
+            let mut reader = ShortReader { bytes, offset: 0, chunk: 1 };
+            assert!(read_initial_version(&mut reader).await.is_err());
+        }
+    }
+
+    #[test]
+    fn validates_direction_length_channel_flags_and_status() {
+        let mut pkt = Packet { channel: 0, flags: 3, final_length: None,
+            payload: vec![0, 1, 0, 1, 0, 7] };
+        assert!(validate_version_packet(&pkt, false).is_ok());
+        assert!(validate_version_packet(&pkt, true).is_err());
+        pkt.channel = 1;
+        assert!(validate_version_packet(&pkt, false).is_err());
+        pkt.channel = 0;
+        pkt.flags = 11;
+        assert!(validate_version_packet(&pkt, false).is_err());
+        pkt.flags = 1;
+        assert!(validate_version_packet(&pkt, false).is_err());
+        pkt.flags = 3;
+        pkt.payload = vec![0, 2, 0, 1, 0, 7, 0, 0];
+        assert!(validate_version_packet(&pkt, true).is_ok());
+        pkt.payload[7] = 1;
+        assert!(validate_version_packet(&pkt, true).is_err());
+        pkt.payload.clear();
+        assert!(validate_version_packet(&pkt, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn closed_relay_reports_negotiation_stage() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        drop(tx);
+        let error = receive_version(&mut rx, false, "HU VERSION_REQUEST relay").await.err().unwrap();
+        assert!(error.to_string().contains("HU VERSION_REQUEST relay"));
     }
 }

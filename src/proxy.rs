@@ -760,11 +760,10 @@ pub async fn io_loop(
         if aa_server_tcp_enabled {
             // Direct Android Auto Head Unit Server mode replaces the MD/phone-side
             // USB/Bluetooth/Wi-Fi transport only. Do not connect yet: open the
-            // HU/DHU side first, then create a fresh MD TCP connection immediately
-            // before starting the proxy so DHU's first version frame is not sent
-            // over a stale idle socket.
+            // HU/DHU side first and buffer its real VERSION_REQUEST, then create
+            // a fresh MD TCP connection and relay the buffered request once.
             info!(
-                "{} 🛰️ MD direct TCP mode enabled, delaying MD connect until HU/DHU is ready: <u>{}</u>",
+                "{} 🛰️ MD direct TCP mode enabled, waiting for HU VERSION_REQUEST before MD connect: <u>{}</u>",
                 NAME, aa_server_tcp_addr
             );
             usb_connected.store(false, Ordering::Relaxed);
@@ -922,26 +921,6 @@ pub async fn io_loop(
             }
         }
 
-        if aa_server_tcp_enabled {
-            match tcp_connect_to_aa_server(&aa_server_tcp_addr).await {
-                Ok(s) => {
-                    if let Ok(socket_addr) = aa_server_tcp_addr.parse::<SocketAddr>() {
-                        *companion_ip.write().await = Some(socket_addr.ip());
-                    }
-                    md_tcp = Some(s);
-                }
-                Err(e) => {
-                    error!(
-                        "{} 🔴 MD direct TCP unavailable after HU/DHU became ready: {}",
-                        NAME, e
-                    );
-                    let _ = need_restart.send(None);
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                    continue;
-                }
-            }
-        }
-
         info!("{} ♾️ Starting to proxy data between HU and MD...", NAME);
         let started = Instant::now();
 
@@ -981,7 +960,7 @@ pub async fn io_loop(
 
         // selecting I/O device for reading and writing
         // and creating desired objects for proxy functions
-        let hu_r;
+        let mut hu_r;
         let md_r;
         let hu_w;
         let md_w;
@@ -990,9 +969,84 @@ pub async fn io_loop(
         #[cfg(feature = "io-uring")]
         {
             use crate::io_uring::IoDevice;
+
+            // HU transfer device: real USB-gadget FunctionFS mode isn't supported in
+            // io-uring builds yet (main.rs refuses to start it — see
+            // src/usb_functionfs.rs), so this arm only ever sees the TCP emulator.
+            {
+                // Head Unit Emulator via TCP
+                let hu = Rc::new(hu_tcp.unwrap());
+                hu_r = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
+                hu_w = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
+                hu_tcp_stream = Some(hu.clone());
+            }
+        }
+        #[cfg(not(feature = "io-uring"))]
+        {
+            use crate::io_tokio::IoDevice;
+
+            // HU transfer device
+            if let Some(hu) = hu_ffs {
+                // HU connected via the FunctionFS accessory gadget
+                hu_r = IoDevice::FfsReader(Arc::new(Mutex::new(hu.reader)));
+                hu_w = IoDevice::FfsWriter(Arc::new(Mutex::new(hu.writer)));
+            } else {
+                // Head Unit Emulator via TCP
+                let stream = hu_tcp.unwrap();
+                let (read_half, write_half) = stream.into_split();
+                hu_r = IoDevice::TcpRead(Arc::new(Mutex::new(read_half)));
+                let write_half = Arc::new(Mutex::new(write_half));
+                hu_w = IoDevice::TcpWrite(write_half.clone());
+
+                // save for cleanup/shutdown later
+                hu_tcp_stream = Some(write_half);
+            }
+        }
+
+        // AARE starts its 15s VERSION timer when TCP is accepted. A gadget
+        // handle/ready notification is not proof that the HU has sent anything.
+        // Read exactly one complete request before connecting; never read ahead
+        // into TLS or synthesize a version on behalf of a silent HU.
+        let initial_version = if aa_server_tcp_enabled {
+            match crate::mitm::read_initial_version(&mut hu_r).await {
+                Ok(pkt) => Some(pkt),
+                Err(e) => {
+                    error!("{} direct TCP: HU VERSION_REQUEST unavailable; MD not connected: {}", NAME, e);
+                    tcp_shutdown!(hu_tcp_stream);
+                    let _ = need_restart.send(None);
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+
+        if aa_server_tcp_enabled {
+            match tcp_connect_to_aa_server(&aa_server_tcp_addr).await {
+                Ok(s) => {
+                    if let Ok(socket_addr) = aa_server_tcp_addr.parse::<SocketAddr>() {
+                        *companion_ip.write().await = Some(socket_addr.ip());
+                    }
+                    md_tcp = Some(s);
+                }
+                Err(e) => {
+                    error!(
+                        "{} 🔴 MD direct TCP unavailable after HU/DHU became ready: {}",
+                        NAME, e
+                    );
+                    tcp_shutdown!(hu_tcp_stream);
+                    let _ = need_restart.send(None);
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    continue;
+                }
+            }
+        }
+
+        #[cfg(feature = "io-uring")]
+        {
+            use crate::io_uring::IoDevice;
             use std::cell::RefCell;
             use std::marker::PhantomData;
-
             // MD transfer device
             if let Some(md) = md_usb {
                 // MD over wired USB
@@ -1009,21 +1063,10 @@ pub async fn io_loop(
                 md_w = IoDevice::EndpointIo(md.clone());
                 md_tcp_stream = Some(md.clone());
             }
-            // HU transfer device: real USB-gadget FunctionFS mode isn't supported in
-            // io-uring builds yet (main.rs refuses to start it — see
-            // src/usb_functionfs.rs), so this arm only ever sees the TCP emulator.
-            {
-                // Head Unit Emulator via TCP
-                let hu = Rc::new(hu_tcp.unwrap());
-                hu_r = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
-                hu_w = IoDevice::<TcpStream>::TcpStreamIo(hu.clone());
-                hu_tcp_stream = Some(hu.clone());
-            }
         }
         #[cfg(not(feature = "io-uring"))]
         {
             use crate::io_tokio::IoDevice;
-
             // MD transfer device
             if let Some(md) = md_usb {
                 // MD over wired USB
@@ -1041,22 +1084,6 @@ pub async fn io_loop(
 
                 // save for cleanup/shutdown later
                 md_tcp_stream = Some(write_half);
-            }
-            // HU transfer device
-            if let Some(hu) = hu_ffs {
-                // HU connected via the FunctionFS accessory gadget
-                hu_r = IoDevice::FfsReader(Arc::new(Mutex::new(hu.reader)));
-                hu_w = IoDevice::FfsWriter(Arc::new(Mutex::new(hu.writer)));
-            } else {
-                // Head Unit Emulator via TCP
-                let stream = hu_tcp.unwrap();
-                let (read_half, write_half) = stream.into_split();
-                hu_r = IoDevice::TcpRead(Arc::new(Mutex::new(read_half)));
-                let write_half = Arc::new(Mutex::new(write_half));
-                hu_w = IoDevice::TcpWrite(write_half.clone());
-
-                // save for cleanup/shutdown later
-                hu_tcp_stream = Some(write_half);
             }
         }
 
@@ -1077,6 +1104,7 @@ pub async fn io_loop(
             tx_hu.clone(),
             rx_hu,
             rxr_md,
+            initial_version,
             shared_config.clone(),
             sensor_channel.clone(),
             input_channel.clone(),
@@ -1098,6 +1126,7 @@ pub async fn io_loop(
             tx_md.clone(),
             rx_md,
             rxr_hu,
+            None,
             shared_config.clone(),
             sensor_channel.clone(),
             input_channel.clone(),
