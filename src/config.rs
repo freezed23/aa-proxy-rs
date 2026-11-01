@@ -782,6 +782,11 @@ pub struct AppConfig {
     pub protocol_version_override_enabled: bool,
     pub protocol_version_override_major: u16,
     pub protocol_version_override_minor: u16,
+    /// Consume modern 0x8006/0x8007 NavigationStatus frames locally instead of
+    /// sending them to an older HU. The phone-side protocol override is separate.
+    /// Disabled by default until explicitly enabled for a controlled bench test.
+    #[serde(default)]
+    pub modern_nav_drop_before_hu: bool,
     pub external_antenna: bool,
     /// Base TCP port for media stream tapping. One port is allocated per media sink
     /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
@@ -1224,6 +1229,7 @@ impl Default for AppConfig {
             protocol_version_override_enabled: false,
             protocol_version_override_major: 5,
             protocol_version_override_minor: 1,
+            modern_nav_drop_before_hu: false,
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
@@ -1584,6 +1590,7 @@ impl AppConfig {
         doc["protocol_version_override_enabled"] = value(self.protocol_version_override_enabled);
         doc["protocol_version_override_major"] = value(self.protocol_version_override_major as i64);
         doc["protocol_version_override_minor"] = value(self.protocol_version_override_minor as i64);
+        doc["modern_nav_drop_before_hu"] = value(self.modern_nav_drop_before_hu);
         doc["external_antenna"] = value(self.external_antenna);
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);
