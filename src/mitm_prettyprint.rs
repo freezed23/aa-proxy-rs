@@ -924,8 +924,28 @@ macro_rules! parse_pretty_message {
 
 fn pretty_control_message(control: Option<ControlMessageType>, data: &[u8]) -> Option<String> {
     match control.unwrap_or(MESSAGE_UNEXPECTED_MESSAGE) {
-        MESSAGE_VERSION_REQUEST => parse_pretty_message!(VersionRequestOptions, data),
-        MESSAGE_VERSION_RESPONSE => parse_pretty_message!(VersionResponseOptions, data),
+        MESSAGE_VERSION_REQUEST | MESSAGE_VERSION_RESPONSE => {
+            let response = control == Some(MESSAGE_VERSION_RESPONSE);
+            let prefix = if response { 6 } else { 4 };
+            if data.len() < prefix {
+                return Some(format!("truncated version body: {} bytes (need {prefix})", data.len()));
+            }
+            let major = u16::from_be_bytes([data[0], data[1]]);
+            let minor = u16::from_be_bytes([data[2], data[3]]);
+            let mut out = format!("protocol_version: {major}.{minor}\n");
+            if response {
+                out.push_str(&format!("status: {}\n", u16::from_be_bytes([data[4], data[5]])));
+            }
+            if data.len() > prefix {
+                let options = if response {
+                    parse_pretty_message!(VersionResponseOptions, &data[prefix..])
+                } else {
+                    parse_pretty_message!(VersionRequestOptions, &data[prefix..])
+                };
+                if let Some(options) = options { out.push_str(&options); }
+            }
+            Some(out)
+        },
         MESSAGE_BYEBYE_REQUEST => parse_pretty_message!(ByeByeRequest, data),
         MESSAGE_BYEBYE_RESPONSE => parse_pretty_message!(ByeByeResponse, data),
         MESSAGE_AUTH_COMPLETE => parse_pretty_message!(AuthResponse, data),
@@ -1728,5 +1748,29 @@ mod hardening_tests {
             PacketDebugServiceKind::MediaSink,
             &cfg
         ));
+    }
+}
+
+#[cfg(test)]
+mod version_prefix_tests {
+    use super::*;
+
+    #[test]
+    fn fixed_version_prefix_is_not_parsed_as_protobuf() {
+        let request = pretty_control_message(Some(MESSAGE_VERSION_REQUEST), &[0, 1, 0, 7]).unwrap();
+        assert!(request.contains("protocol_version: 1.7"));
+        assert!(!request.contains("parse failed"));
+        let response = pretty_control_message(Some(MESSAGE_VERSION_RESPONSE), &[0, 6, 0, 1, 0, 0]).unwrap();
+        assert!(response.contains("protocol_version: 6.1"));
+        assert!(response.contains("status: 0"));
+        assert!(!response.contains("parse failed"));
+    }
+
+    #[test]
+    fn truncated_prefix_has_a_specific_diagnostic() {
+        for n in 0..4 {
+            assert!(pretty_control_message(Some(MESSAGE_VERSION_REQUEST), &vec![0; n]).unwrap().contains("truncated"));
+        }
+        assert!(pretty_control_message(Some(MESSAGE_VERSION_RESPONSE), &[0; 5]).unwrap().contains("truncated"));
     }
 }
