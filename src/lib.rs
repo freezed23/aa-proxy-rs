@@ -54,3 +54,5 @@ pub mod vendor_ext;
 #[cfg(feature = "wasm-scripting")]
 pub mod wasm_config;
 pub mod web;
+
+pub(crate) mod startup_guard;

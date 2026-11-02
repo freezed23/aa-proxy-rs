@@ -55,6 +55,7 @@ fn main() {
         .includes(&["src/protos"])
         // Inputs must reside in some of include paths.
         .input("src/protos/WifiStartRequest.proto")
+        .input("src/protos/WifiConnectStatus.proto")
         .input("src/protos/WifiInfoResponse.proto")
         .input("src/protos/protos.proto")
         .input("src/protos/ev.proto")
