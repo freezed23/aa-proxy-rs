@@ -39,6 +39,9 @@ ENV PKG_CONFIG_ALLOW_CROSS=1 \
 WORKDIR /src
 COPY . .
 
+# Exercise the actual shared WPP/startup policy on the builder host before ARM export.
+RUN rustc --edition=2021 --test src/startup_guard.rs -o /tmp/aa-startup-tests && /tmp/aa-startup-tests
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/src/target \

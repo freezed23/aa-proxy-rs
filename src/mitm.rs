@@ -1114,7 +1114,15 @@ impl Packet {
             frame.push((final_len & 0xff) as u8);
         }
         frame.append(&mut self.payload.clone());
-        device.write_data(&frame).await
+        let mut written = 0;
+        while written < frame.len() {
+            let n = device.write_data(&frame[written..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "AA frame write made no progress"));
+            }
+            written += n;
+        }
+        Ok(written)
     }
 
     /// decapsulates SSL payload and feeds it into rustls
@@ -4354,6 +4362,7 @@ pub async fn proxy<D: IoDeviceTrait>(
     mut rx: Receiver<Packet>,
     mut rxr: Receiver<Packet>,
     initial_version: Option<Packet>,
+    startup_ready: Arc<std::sync::atomic::AtomicU8>,
     mut config: SharedConfig,
     sensor_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
     input_channel: Arc<tokio::sync::Mutex<Option<u8>>>,
@@ -4374,7 +4383,9 @@ pub async fn proxy<D: IoDeviceTrait>(
     let hex_requested = debug_cfg.hexdump_level;
 
     // in full_frames/passthrough mode we only directly pass packets from one endpoint to the other
+    let ready_bit = if proxy_type == ProxyType::HeadUnit { 1 } else { 2 };
     if passthrough {
+        startup_ready.fetch_or(ready_bit, Ordering::Release);
         if let Some(mut pkt) = initial_version {
             maybe_override_raw_control_protocol_version(proxy_type, "buffered HU -> MD", &mut pkt, &cfg);
             tx.send(pkt).await?;
@@ -4549,10 +4560,13 @@ pub async fn proxy<D: IoDeviceTrait>(
             None,
         )
         .await;
-        pkt.transmit(&mut device)
+        let sent = pkt.transmit(&mut device)
             .await
             .with_context(|| format!("proxy/{}: transmit failed", get_name(proxy_type)))?;
-        info!("{} VERSION_REQUEST transmitted to MD; waiting for response", get_name(proxy_type));
+        info!("{} VERSION_REQUEST transmitted to MD: bytes={} channel={} flags={:#04x} version={}.{}; waiting for response", get_name(proxy_type),
+            sent, pkt.channel, pkt.flags,
+            u16::from_be_bytes([pkt.payload[2], pkt.payload[3]]),
+            u16::from_be_bytes([pkt.payload[4], pkt.payload[5]]));
         // waiting for MD reply
         let mut pkt = receive_version(&mut rxr, true, "MD VERSION_RESPONSE").await?;
         maybe_override_raw_control_protocol_version(
@@ -4636,6 +4650,9 @@ pub async fn proxy<D: IoDeviceTrait>(
             pkt.ssl_decapsulate_write(&mut mem_buf).await?;
         }
     }
+
+    startup_ready.fetch_or(ready_bit, Ordering::Release);
+    info!("{} AA initial TLS negotiation complete; streaming path ready", get_name(proxy_type));
 
     // main data processing/transfer loop
     let mut ctx = ModifyContext {

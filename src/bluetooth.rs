@@ -4721,49 +4721,47 @@ async fn read_message(
     id: MessageId,
     started: Instant,
 ) -> Result<usize> {
-    let mut header = [0u8; HEADER_LEN];
-    stream.read_exact(&mut header).await?;
-    debug!("received header bytes: {:02X?}", header);
-    let elapsed = started.elapsed();
-
-    let len: usize = u16::from_be_bytes(header[0..2].try_into()?).into();
-    let message_id = u16::from_be_bytes(header[2..4].try_into()?);
-    debug!("MessageID = {}, len = {}", message_id, len);
-
-    if message_id != id.clone() as u16 {
-        warn!(
-            "Received data has invalid MessageID: got: {:?}, expected: {:?}",
-            message_id, id
-        );
-    }
-    info!(
-        "{} 📨 stage #{} of {}: Received <yellow>{:?}</> frame from phone (⏱️ {} ms)",
-        NAME,
-        stage,
-        STAGES,
-        id,
-        (elapsed.as_secs() * 1_000) + (elapsed.subsec_nanos() / 1_000_000) as u64,
-    );
-
-    // read and discard the remaining bytes
-    if len > 0 {
-        let mut buf = vec![0; len];
-        let n = stream.read_exact(&mut buf).await?;
-        debug!("remaining {} bytes: {:02X?}", n, buf);
-
-        // analyzing WifiConnectStatus
-        // this is a frame where phone cannot connect to WiFi:
-        // [08, FD, FF, FF, FF, FF, FF, FF, FF, FF, 01] -> which is -i64::MAX
-        // and this is where all is fine:
-        // [08, 00]
-        if id == MessageId::WifiConnectStatus && n >= 2 {
-            if buf[1] != 0 {
-                return Err("phone cannot connect to our WiFi AP...".into());
+    use crate::startup_guard::{wpp_action, WppAction};
+    // One absolute stage deadline: repeated keepalives cannot extend it forever.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    timeout_at_stage(deadline, async {
+        loop {
+            let mut header = [0u8; HEADER_LEN];
+            stream.read_exact(&mut header).await?;
+            let len = u16::from_be_bytes([header[0], header[1]]) as usize;
+            let actual = u16::from_be_bytes([header[2], header[3]]);
+            let mut payload = vec![0u8; len];
+            stream.read_exact(&mut payload).await?;
+            match wpp_action(id.clone() as u16, actual) {
+                WppAction::ReplyPing => {
+                    // WPP replies echo the request payload verbatim; no stage advancement.
+                    header[2..4].copy_from_slice(&(MessageId::WifiPingResponse as u16).to_be_bytes());
+                    stream.write_all(&header).await?;
+                    stream.write_all(&payload).await?;
+                    info!("{} WPP stage #{}: replied to WifiPingRequest; still waiting for {:?}", NAME, stage, id);
+                    continue;
+                }
+                WppAction::IgnorePing => continue,
+                WppAction::Reject => return Err(format!("WPP stage #{stage}: expected {:?}, received message_id={actual}", id).into()),
+                WppAction::Accept => {}
             }
+            if id == MessageId::WifiConnectStatus {
+                let status = WifiConnectStatus::WifiConnectStatus::parse_from_bytes(&payload)?.status();
+                if status != 0 {
+                    return Err(format!("phone Wi-Fi connection rejected: status={status}").into());
+                }
+            }
+            info!("{} 📨 stage #{} of {}: Received {:?} frame from phone ({} ms)",
+                NAME, stage, STAGES, id, started.elapsed().as_millis());
+            return Ok(HEADER_LEN + len);
         }
-    }
+    }).await
+}
 
-    Ok(HEADER_LEN + len)
+async fn timeout_at_stage<F, T>(deadline: tokio::time::Instant, operation: F) -> Result<T>
+where F: std::future::Future<Output = Result<T>> {
+    tokio::time::timeout_at(deadline, operation).await
+        .map_err(|_| "WPP stage timed out waiting for the expected response")?
 }
 
 fn auto_accept_only_configured_hu(

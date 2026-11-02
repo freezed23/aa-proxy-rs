@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 #[cfg(feature = "io-uring")]
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::fs::File as TokioFile;
@@ -80,14 +80,14 @@ async fn transfer_monitor(
     usb_bytes_written: Arc<AtomicUsize>,
     tcp_bytes_written: Arc<AtomicUsize>,
     read_timeout: Duration,
+    startup_ready: Arc<AtomicU8>,
     config: SharedConfig,
 ) -> Result<()> {
     let mut usb_bytes_out_last: usize = 0;
     let mut tcp_bytes_out_last: usize = 0;
-    let mut stall_usb_bytes_last: usize = 0;
-    let mut stall_tcp_bytes_last: usize = 0;
+    let mut startup_guard = crate::startup_guard::StartupGuard::default();
+    let startup_started = Instant::now();
     let mut report_time = Instant::now();
-    let mut stall_check = Instant::now();
 
     info!(
         "{} ⚙️ Showing transfer statistics: <b><blue>{}</>",
@@ -140,20 +140,11 @@ async fn transfer_monitor(
             tcp_bytes_out_last = tcp_bytes_out;
         }
 
-        // transfer stall detection
-        if stall_check.elapsed() > read_timeout {
-            // compute delta since last check
-            stall_usb_bytes_last = usb_bytes_out - stall_usb_bytes_last;
-            stall_tcp_bytes_last = tcp_bytes_out - stall_tcp_bytes_last;
-
-            if stall_usb_bytes_last == 0 || stall_tcp_bytes_last == 0 {
-                return Err("unexpected transfer stall".into());
-            }
-
-            // save values for next iteration
-            stall_check = Instant::now();
-            stall_usb_bytes_last = usb_bytes_out;
-            stall_tcp_bytes_last = tcp_bytes_out;
+        // Initial protocol negotiation is not streaming traffic. Arm the normal
+        // idle timer only after both MITM TLS sides (or passthrough sides) are ready.
+        if startup_guard.check(startup_started.elapsed(),
+            startup_ready.load(Ordering::Acquire), (usb_bytes_out, tcp_bytes_out), read_timeout)? {
+            info!("{} AA negotiation ready on both sides; streaming stall monitor armed", NAME);
         }
 
         // check pending action
@@ -1093,6 +1084,8 @@ pub async fn io_loop(
             *tx_lock = Some(tx_hu.clone());
         }
 
+        let startup_ready = Arc::new(AtomicU8::new(0));
+
         // dedicated reading threads:
         reader_hu = spawn!(endpoint_reader(hu_r, txr_hu, true));
         reader_md = spawn!(endpoint_reader(md_r, txr_md, false));
@@ -1105,6 +1098,7 @@ pub async fn io_loop(
             rx_hu,
             rxr_md,
             initial_version,
+            startup_ready.clone(),
             shared_config.clone(),
             sensor_channel.clone(),
             input_channel.clone(),
@@ -1127,6 +1121,7 @@ pub async fn io_loop(
             rx_md,
             rxr_hu,
             None,
+            startup_ready.clone(),
             shared_config.clone(),
             sensor_channel.clone(),
             input_channel.clone(),
@@ -1148,6 +1143,7 @@ pub async fn io_loop(
             file_bytes,
             stream_bytes,
             read_timeout,
+            startup_ready,
             shared_config.clone(),
         ));
 
