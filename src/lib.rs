@@ -56,3 +56,5 @@ pub mod vendor_ext;
 pub mod wasm_config;
 pub mod web;
 pub(crate) mod nav_capture;
+
+pub(crate) mod config_persist;

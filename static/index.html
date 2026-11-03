@@ -1808,7 +1808,15 @@
             showSnackbar("Save failed: " + t, "error");
             return;
           }
-          showSnackbar("Configuration saved.", "success");
+          const expectedEnum = out.nav_sdr_enum_to_phone_enabled;
+          const check = await fetch("/config", { cache: "no-store" });
+          if (!check.ok) throw new Error("Saved, but configuration read-back failed");
+          const actual = await check.json();
+          for (const id of CONFIG_IDS) setValue(id, actual[id]);
+          evaluateRequires();
+          if (expectedEnum !== undefined && actual.nav_sdr_enum_to_phone_enabled !== expectedEnum)
+            throw new Error("ENUM read-back does not match the saved selection");
+          showSnackbar("Configuration saved and verified. Reconnect AA for ENUM changes.", "success");
         } catch (e) {
           showSnackbar("Save failed: " + e.message, "error");
         }

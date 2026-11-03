@@ -1403,8 +1403,8 @@ impl AppConfig {
         Ok(file_config.unwrap())
     }
 
-    pub fn save(&self, config_file: PathBuf) {
-        debug!("Saving config: {:?}", self);
+    pub fn save(&self, config_file: PathBuf) -> std::io::Result<()> {
+        debug!("Saving configuration");
         let raw = fs::read_to_string(&config_file).unwrap_or_default();
         let mut doc = raw.parse::<DocumentMut>().unwrap_or_else(|_| {
             // if the file doesn't exists or there is parse error, create a new one
@@ -1676,19 +1676,15 @@ impl AppConfig {
         doc["wasm_script_lifecycle_epoch_deadline"] =
             value(self.wasm_script_lifecycle_epoch_deadline as i64);
 
-        match fs::write(&config_file, doc.to_string()) {
-            Ok(()) => {
-                info!("{} ⚙️ Configuration saved: {}", NAME, config_file.display());
-            }
-            Err(e) => {
-                error!(
-                    "{} 🔴 Failed to save configuration to {}: {}",
-                    NAME,
-                    config_file.display(),
-                    e
-                );
-            }
-        }
+        crate::config_persist::atomic_write(&config_file, doc.to_string().as_bytes())?;
+        info!("{} ⚙️ Configuration saved: {}", NAME, config_file.display());
+        Ok(())
+    }
+
+    pub fn from_toml(text: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(::config::Config::builder()
+            .add_source(::config::File::from_str(text, ::config::FileFormat::Toml))
+            .build()?.try_deserialize()?)
     }
 
     pub fn load_config_json() -> Result<ConfigJson, Box<dyn std::error::Error>> {

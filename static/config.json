@@ -398,6 +398,11 @@
           "description": "AAW1 experiment: consume phone->HU NavigationStatus 0x8006/0x8007 (including fragments) before older HU sees them. Keep navigation start/status, H.264/audio/control untouched. Requires a successful SDR and opt-in; default false. Does not itself force a new AA version. WARNING: phone protocol version forcing may change other messages; bench-test only.",
           "requires": "protocol_version_override_enabled",
           "advanced": true
+        },
+        "nav_sdr_enum_to_phone_enabled": {
+          "typ": "boolean",
+          "description": "EXPERIMENTAL: advertise ENUM navigation to the phone while retaining the original HU IMAGE service. Default OFF. Save, then reconnect Android Auto to renegotiate SDR. Does not guarantee 0x8006/0x8007 or lanes.",
+          "advanced": true
         }
       }
     },
