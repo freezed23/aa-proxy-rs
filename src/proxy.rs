@@ -497,7 +497,7 @@ macro_rules! impl_tcp_wait_for_connection {
     // this is creating a reverse tcp bridge for Android.
     // Direct connection to the device side is not allowed. It is only meaningful
     // for MD/phone connections; DHU emulator clients must not start these bridges.
-    if start_companion_bridges {
+    if start_companion_bridges && !crate::GOOGLE_AA_ONLY {
         if !addr.ip().is_loopback() {
             *companion_ip.write().await = Some(addr.ip());
             let c = cancel.clone();
