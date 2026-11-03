@@ -497,7 +497,7 @@ macro_rules! impl_tcp_wait_for_connection {
     // this is creating a reverse tcp bridge for Android.
     // Direct connection to the device side is not allowed. It is only meaningful
     // for MD/phone connections; DHU emulator clients must not start these bridges.
-    if start_companion_bridges && !crate::GOOGLE_AA_ONLY {
+    if start_companion_bridges {
         if !addr.ip().is_loopback() {
             *companion_ip.write().await = Some(addr.ip());
             let c = cancel.clone();
@@ -748,7 +748,7 @@ pub async fn io_loop(
         let aa_server_tcp_addr = config.aa_server_tcp_addr.trim().to_string();
         // Official Google AA connects through the normal phone listener.
         // Ignore any persisted AARE direct-server address in this build.
-        let aa_server_tcp_enabled = !crate::GOOGLE_AA_ONLY && !aa_server_tcp_addr.is_empty();
+        let aa_server_tcp_enabled = !crate::DISABLE_AARE_DIRECT_TCP && !aa_server_tcp_addr.is_empty();
 
         if aa_server_tcp_enabled {
             // Direct Android Auto Head Unit Server mode replaces the MD/phone-side

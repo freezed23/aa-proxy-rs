@@ -285,7 +285,7 @@ pub fn static_media_tap_aux_slot_count(config: &AppConfig) -> u8 {
         }
     };
 
-    if crate::GOOGLE_AA_ONLY || !file.enabled {
+    if !file.enabled {
         return 0;
     }
 
@@ -3685,7 +3685,7 @@ pub async fn pkt_modify_hook(
                 }
             }
 
-            let injected_displays = if !crate::GOOGLE_AA_ONLY { add_display_services(&mut msg, cfg) } else { Vec::new() };
+            let injected_displays = add_display_services(&mut msg, cfg);
             if !injected_displays.is_empty() {
                 let mut added_service_count = 0usize;
                 for injected in injected_displays {
@@ -3743,7 +3743,7 @@ pub async fn pkt_modify_hook(
 
             // add vendor channel as extra, do not touch existing HU channels
             // this must be last entry do not replace
-            if !crate::GOOGLE_AA_ONLY && cfg.add_vendor_channel {
+            if cfg.add_vendor_channel {
                 let already_present = has_vendor_extension_service(&msg);
 
                 info!(
