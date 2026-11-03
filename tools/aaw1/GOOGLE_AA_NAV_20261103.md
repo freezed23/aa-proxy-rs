@@ -1,0 +1,7 @@
+# Official Google AA navigation build
+
+Owner-selected Google-AA-only build stacked on 0ff005a (#15), not main. The binary ignores saved AARE direct-server address, companion vendor-channel enable and injected display profiles/AUX listeners. WPP/TLS transport correctness fixes are retained. Existing setting files remain available for rollback; AARE APK is neither modified nor built.
+
+NavigationState 0x8006 and NavigationCurrentPosition 0x8007 use existing canonical protobuf schema. NAV_PARSED text preserves presence, enums, lane directions/highlights, roads, maneuver, destinations, distance and ETA. It runs once at HeadUnit ToEndpoint on the SDR-discovered NavigationStatus channel before optional legacy-HU drop, independent of diagnostic filters. Fragment reassembly is observational, 64KiB/128 frames/3 seconds, one pending nav message per session. Unknown fields remain protobuf unknowns; malformed messages report metadata only. No invented lane data when absent. Nav data may contain destination addresses: keep logs private.
+
+Three actual collector tests added to mandatory Docker builder-host gate. Existing 8 startup-policy tests retained. ARM cross compilation is not runtime connection proof. Existing 8006/8007 schemas/pretty decoders predate this change; this adds always-observed parse logging before filtering. Runtime TLS success followed by SDR-stage transmit failure does not prove AARE/display injection is the cause. No device deployment.

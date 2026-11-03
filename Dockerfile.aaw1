@@ -40,6 +40,8 @@ WORKDIR /src
 COPY . .
 
 # Exercise the actual shared WPP/startup policy on the builder host before ARM export.
+RUN rustc --edition=2021 --test src/nav_capture.rs -o /tmp/nav-tests && /tmp/nav-tests
+
 RUN rustc --edition=2021 --test src/startup_guard.rs -o /tmp/aa-startup-tests && /tmp/aa-startup-tests
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \

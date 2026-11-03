@@ -56,3 +56,7 @@ pub mod wasm_config;
 pub mod web;
 
 pub(crate) mod startup_guard;
+pub(crate) mod nav_capture;
+
+/// Owner-selected official Google AA build; ignore experimental companion/display settings.
+pub(crate) const GOOGLE_AA_ONLY: bool = true;

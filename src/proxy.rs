@@ -746,7 +746,9 @@ pub async fn io_loop(
         let mut bridge_cancel: Option<CancellationToken> = None;
 
         let aa_server_tcp_addr = config.aa_server_tcp_addr.trim().to_string();
-        let aa_server_tcp_enabled = !aa_server_tcp_addr.is_empty();
+        // Official Google AA connects through the normal phone listener.
+        // Ignore any persisted AARE direct-server address in this build.
+        let aa_server_tcp_enabled = !crate::GOOGLE_AA_ONLY && !aa_server_tcp_addr.is_empty();
 
         if aa_server_tcp_enabled {
             // Direct Android Auto Head Unit Server mode replaces the MD/phone-side
