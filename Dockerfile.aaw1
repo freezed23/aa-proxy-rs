@@ -16,6 +16,7 @@ FROM rust:bookworm AS builder
 
 RUN dpkg --add-architecture armhf && apt-get update && apt-get install -y --no-install-recommends \
     git \
+    python3 \
     pkg-config \
     gcc-arm-linux-gnueabihf \
     g++-arm-linux-gnueabihf \
@@ -41,6 +42,8 @@ COPY . .
 
 # Host validation of the observational collector before ARM export.
 RUN rustc --edition=2021 --test src/nav_capture.rs -o /tmp/nav-tests && /tmp/nav-tests
+# Host protobuf/regression tests include the opt-in nav SDR rewrite and byte-preserving OFF path.
+RUN python3 tools/aaw1/run_focused_tests.py
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
