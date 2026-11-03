@@ -170,6 +170,7 @@ pub struct ModifyContext {
     pub(crate) nav_channel: Option<u8>,
     /// Locally consumed modern navigation messages spanning transport fragments.
     pub(crate) modern_nav_suppressed_channels: HashSet<u8>,
+    pub(crate) nav_capture: crate::nav_capture::NavCapture,
     pub(crate) audio_channels: Vec<u8>,
     pub(crate) ev_tx: Sender<EvTaskCommand>,
     pub(crate) input_channel: Option<u8>,
@@ -2224,9 +2225,27 @@ pub async fn pkt_modify_hook(
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<PacketAction> {
-    // if for some reason we have too small packet, bail out
-    if pkt.payload.len() < 2 {
-        return Ok(PacketAction::Forward);
+    // Observe once at the HU egress, before optional legacy-HU suppression.
+    // Never infer NavigationStatus from a fixed channel number or mutate payloads.
+    if proxy_type == ProxyType::HeadUnit && flow == PacketFlow::ToEndpoint
+        && ctx.nav_channel == Some(pkt.channel) && pkt.flags & _CONTROL == 0
+    {
+        if let Some(frame) = ctx.nav_capture.push(pkt.channel, pkt.flags, pkt.final_length, &pkt.payload) {
+            if frame.len() >= 2 {
+                let id = u16::from_be_bytes([frame[0], frame[1]]);
+                let parsed = match id {
+                    0x8006 => NavigationState::parse_from_bytes(&frame[2..]).map(|m| protobuf::text_format::print_to_string_pretty(&m)),
+                    0x8007 => NavigationCurrentPosition::parse_from_bytes(&frame[2..]).map(|m| protobuf::text_format::print_to_string_pretty(&m)),
+                    _ => Ok(String::new()),
+                };
+                if matches!(id, 0x8006 | 0x8007) {
+                    match parsed {
+                        Ok(text) => info!("NAV_PARSED ch={:#04x} id={:#06x} bytes={} {}", pkt.channel, id, frame.len(), text),
+                        Err(_) => warn!("NAV_PARSE_ERROR ch={:#04x} id={:#06x} bytes={}", pkt.channel, id, frame.len()),
+                    }
+                }
+            }
+        }
     }
 
     // A legacy HU cannot parse modern NavigationState/CurrentPosition messages.
@@ -2234,6 +2253,11 @@ pub async fn pkt_modify_hook(
     // cluster start/status, focus, H.264 and every other service untouched.
     if maybe_suppress_modern_nav_before_hu(proxy_type, flow, pkt, ctx, cfg) {
         return Ok(PacketAction::Drop);
+    }
+
+    // if for some reason we have too small packet, bail out
+    if pkt.payload.len() < 2 {
+        return Ok(PacketAction::Forward);
     }
 
     // Remember the real HU's own video focus (HU -> phone) so the media tap keyframe
@@ -4577,6 +4601,7 @@ pub async fn proxy<D: IoDeviceTrait>(
         input_channel: None,
         nav_channel: None,
         modern_nav_suppressed_channels: HashSet::new(),
+        nav_capture: crate::nav_capture::NavCapture::default(),
         audio_channels: vec![],
         ev_tx,
         hu_tx,
@@ -5024,6 +5049,7 @@ mod tests {
             sensors: None,
             nav_channel: None,
         modern_nav_suppressed_channels: HashSet::new(),
+        nav_capture: crate::nav_capture::NavCapture::default(),
             audio_channels: vec![],
             ev_tx,
             input_channel: None,
