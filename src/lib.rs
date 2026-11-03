@@ -31,6 +31,7 @@ pub mod map_album_art;
 pub mod map_album_art_h264;
 pub mod media_tap;
 pub mod mitm;
+pub(crate) mod nav_sdr;
 pub mod mitm_prettyprint;
 pub mod mpegts;
 pub mod mtp;

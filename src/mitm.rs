@@ -3733,6 +3733,35 @@ pub async fn pkt_modify_hook(
                 }
             }
 
+            // Only rewrite the SDR forwarded from HU to phone. The source HU's
+            // IMAGE service remains untouched on its own endpoint. Run after all
+            // existing UI/display updates, before final channel-map/payload emit.
+            let nav_sdr_reports = crate::nav_sdr::rewrite_phone_navigation_to_enum(
+                &mut msg,
+                cfg.nav_sdr_enum_to_phone_enabled,
+            );
+            if cfg.nav_sdr_enum_to_phone_enabled
+                && !nav_sdr_reports.iter().any(|report| report.changed)
+            {
+                warn!(
+                    "{} NAV_SDR_ENUM enabled, but no HU IMAGE(1) navigation service matched; SDR navigation types unchanged",
+                    get_name(proxy_type)
+                );
+            }
+            for report in nav_sdr_reports {
+                info!(
+                    "{} NAV_SDR_ENUM service_id={} hu_type={:?} phone_type={:?} enabled={} changed={} image_options_before={} image_options_after={}",
+                    get_name(proxy_type),
+                    report.service_id,
+                    report.original_type,
+                    report.phone_type,
+                    cfg.nav_sdr_enum_to_phone_enabled,
+                    report.changed,
+                    report.image_options_before,
+                    report.image_options_after,
+                );
+            }
+
             // add vendor channel as extra, do not touch existing HU channels
             // this must be last entry do not replace
             if cfg.add_vendor_channel {
