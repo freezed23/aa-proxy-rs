@@ -787,6 +787,10 @@ pub struct AppConfig {
     /// Disabled by default until explicitly enabled for a controlled bench test.
     #[serde(default)]
     pub modern_nav_drop_before_hu: bool,
+    /// EXPERIMENTAL: advertise ENUM(2) instead of HU IMAGE(1) to the phone in SDR.
+    /// Preserves original HU services/IDs and HU-facing stream. Default OFF.
+    #[serde(default)]
+    pub nav_sdr_enum_to_phone_enabled: bool,
     pub external_antenna: bool,
     /// Base TCP port for media stream tapping. One port is allocated per media sink
     /// by order in the rewritten ServiceDiscoveryResponse: first media sink uses +0,
@@ -1230,6 +1234,7 @@ impl Default for AppConfig {
             protocol_version_override_major: 5,
             protocol_version_override_minor: 1,
             modern_nav_drop_before_hu: false,
+            nav_sdr_enum_to_phone_enabled: false,
             external_antenna: false,
             media_dump_base_port: None,
             media_wait_for_live_idr: true,
@@ -1591,6 +1596,7 @@ impl AppConfig {
         doc["protocol_version_override_major"] = value(self.protocol_version_override_major as i64);
         doc["protocol_version_override_minor"] = value(self.protocol_version_override_minor as i64);
         doc["modern_nav_drop_before_hu"] = value(self.modern_nav_drop_before_hu);
+        doc["nav_sdr_enum_to_phone_enabled"] = value(self.nav_sdr_enum_to_phone_enabled);
         doc["external_antenna"] = value(self.external_antenna);
         if let Some(port) = self.media_dump_base_port {
             doc["media_dump_base_port"] = value(port as i64);
