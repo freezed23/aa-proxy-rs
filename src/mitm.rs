@@ -2233,11 +2233,6 @@ pub async fn pkt_modify_hook(
     script_registry: Option<Arc<ScriptRegistry>>,
     ws_event_tx: BroadcastSender<ServerEvent>,
 ) -> Result<PacketAction> {
-    // if for some reason we have too small packet, bail out
-    if pkt.payload.len() < 2 {
-        return Ok(PacketAction::Forward);
-    }
-
     // Observe once at the HU egress, before optional legacy-HU suppression.
     // Never infer NavigationStatus from a fixed channel number or mutate payloads.
     if proxy_type == ProxyType::HeadUnit && flow == PacketFlow::ToEndpoint
@@ -2266,6 +2261,11 @@ pub async fn pkt_modify_hook(
     // cluster start/status, focus, H.264 and every other service untouched.
     if maybe_suppress_modern_nav_before_hu(proxy_type, flow, pkt, ctx, cfg) {
         return Ok(PacketAction::Drop);
+    }
+
+    // if for some reason we have too small packet, bail out
+    if pkt.payload.len() < 2 {
+        return Ok(PacketAction::Forward);
     }
 
     // Remember the real HU's own video focus (HU -> phone) so the media tap keyframe
