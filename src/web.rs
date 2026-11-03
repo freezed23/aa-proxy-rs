@@ -2152,50 +2152,22 @@ async fn update_config_entry(
 
     doc[&entry.key] = toml_val;
 
-    if let Err(e) = fs::write(&config_path, doc.to_string()).await {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "status": "error",
-                "message": format!("Failed to write config file: {}", e)
-            })),
-        )
-            .into_response();
+    let text = doc.to_string();
+    let validated = match AppConfig::from_toml(&text) {
+        Ok(config) => config,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"status":"error","message":"Invalid configuration value; nothing saved"}))).into_response(),
+    };
+    if let Err(e) = crate::config_persist::atomic_write(&config_path, text.as_bytes()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"status":"error","message":format!("Failed to persist configuration: {}",e)}))).into_response();
     }
 
-    match AppConfig::load(config_path) {
-        Ok(new_cfg) => {
-            crash::set_crash_handler_enabled(new_cfg.crash_handler_enabled);
-            crash::set_crash_dir(new_cfg.crash_dir.clone());
-            *cfg = new_cfg;
-            info!(
-                "{} {}",
-                NAME,
-                crate::diagnostic_privacy::config_update_log(&entry.key)
-            );
-            (
-                StatusCode::OK,
-                Json(json!({
-                    "status": "success",
-                    "key": entry.key,
-                    "value": entry.value
-                })),
-            )
-                .into_response()
-        }
-        Err(e) => {
-            warn!("{} Config reload failed after update: {}", NAME, e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "status": "error",
-                    "message": format!("Config written but reload failed: {}", e)
-                })),
-            )
-                .into_response()
-        }
-    }
+    crash::set_crash_handler_enabled(validated.crash_handler_enabled);
+    crash::set_crash_dir(validated.crash_dir.clone());
+    *cfg = validated;
+    info!("{} {}", NAME, crate::diagnostic_privacy::config_update_log(&entry.key));
+    (StatusCode::OK, Json(json!({"status":"success","key":entry.key,"value":entry.value}))).into_response()
 }
+
 
 #[cfg(feature = "wasm-scripting")]
 async fn apply_wasm_config_values_from_root(
@@ -2256,7 +2228,13 @@ async fn set_config(
             .into_response();
     }
 
-    let new_cfg: AppConfig = match serde_json::from_value(raw_cfg) {
+    let mut cfg = state.config.write().await;
+    let merged = match serde_json::to_value(&*cfg).ok()
+        .and_then(|current| crate::config_persist::merge_update(current, raw_cfg).ok()) {
+        Some(value) => value,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"status":"error","message":"Configuration update must be an object"}))).into_response(),
+    };
+    let new_cfg: AppConfig = match serde_json::from_value(merged) {
         Ok(cfg) => cfg,
         Err(err) => {
             return (
@@ -2270,13 +2248,13 @@ async fn set_config(
         }
     };
 
-    {
-        crash::set_crash_handler_enabled(new_cfg.crash_handler_enabled);
-        crash::set_crash_dir(new_cfg.crash_dir.clone());
-        let mut cfg = state.config.write().await;
-        *cfg = new_cfg.clone();
-        cfg.save((&state.config_file).to_path_buf());
+    if let Err(e) = new_cfg.save(state.config_file.as_ref().clone()) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"status":"error","message":format!("Failed to persist configuration: {}",e)}))).into_response();
     }
+    crash::set_crash_handler_enabled(new_cfg.crash_handler_enabled);
+    crash::set_crash_dir(new_cfg.crash_dir.clone());
+    *cfg = new_cfg.clone();
+    drop(cfg);
 
     let mut response_json = serde_json::to_value(new_cfg).unwrap_or_else(|_| json!({}));
 

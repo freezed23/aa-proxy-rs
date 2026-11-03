@@ -50,7 +50,7 @@ def main():
             pub struct ModifyContext { pub debug_channel_kinds:std::collections::HashMap<u8,crate::mitm_prettyprint::PacketDebugServiceKind>, pub pkt_debug_full_frames:crate::mitm_prettyprint::PktDebugFullFrameBuffers }
         }
         '''
-        for name in ["sdr_text", "nav_sdr", "diagnostic_privacy", "debug_capture", "packet_debug_config", "companion_protocol", "mitm_prettyprint"]:
+        for name in ["config_persist", "sdr_text", "nav_sdr", "diagnostic_privacy", "debug_capture", "packet_debug_config", "companion_protocol", "mitm_prettyprint"]:
             lib += '#[path=' + json.dumps(str(ROOT / f"src/{name}.rs")) + f'] pub mod {name};\n'
         (harness / "src/lib.rs").write_text(lib)
         (harness / "tests/sdr_opaque_metadata.rs").write_bytes((ROOT / "tests/sdr_opaque_metadata.rs").read_bytes())

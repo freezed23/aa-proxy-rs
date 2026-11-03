@@ -605,8 +605,10 @@ async fn handle_client(stream: Stream, state: AppState) -> Result<()> {
 
                 {
                     let mut cfg = state.config.write().await;
-                    cfg.companion_bt_auth_token = token.clone();
-                    cfg.save(state.config_file.as_ref().clone());
+                    let mut updated = cfg.clone();
+                    updated.companion_bt_auth_token = token.clone();
+                    updated.save(state.config_file.as_ref().clone())?;
+                    *cfg = updated;
                 }
                 auth.token = token;
                 auth.server_nonce = Some(random_bytes(AUTH_NONCE_LEN));
