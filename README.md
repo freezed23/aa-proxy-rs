@@ -40,6 +40,7 @@ The project initially focused on supporting the Raspberry Pi, but has since grow
   - **Event injection** – key event injection via `/inject_event` and rotary controller support via `/inject_rotary`
   - **WASM scripting** – write hooks that modify AA packets on the fly via `wasmtime`
     - Persistent script state and lifecycle hooks
+    - Each hook can write state files in its own private folder, preopened as `.`
     - Configurable resource limits and hooks directory
     - Web UI integration for per-script configuration
     - Scripts can call the local REST API and push events over WebSocket
@@ -217,16 +218,33 @@ overlay_enabled = true
 # optional, these are the defaults:
 overlay_text_path = "/dev/shm/overlay.json"
 overlay_font_path = ""   # path to a .ttf font, empty = built-in bitmap font (see below)
-overlay_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs), or "v4l2"
+overlay_hw_accel = "none" # "none" (default pure-Rust software), "auto" (detect V4L2 M2M codecs, then Sophgo CVI), "v4l2", or "cvi"
 overlay_v4l2_decoder = "" # optional explicit V4L2 decoder device (e.g. "/dev/video10" on Raspberry Pi)
 overlay_v4l2_encoder = "" # optional explicit V4L2 encoder device (e.g. "/dev/video11" on Raspberry Pi)
 ```
 The option is evaluated when an Android Auto session starts, so a change applies on the next connection. While enabled, every frame of the main display
 goes through the decode/render/encode pipeline (even with empty text), and `VIDEO_FPS_60` is capped to 30 (see `cap_video_fps_to_30`).
 
-On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software. (Ensure `/boot/firmware/config.txt` has `gpu_mem=128`).
+On supported boards like **Raspberry Pi 3/4/Zero 2 W** (excluding Raspberry Pi 5) with h264 hw acceleration, setting `overlay_hw_accel = "auto"` offloads H.264 decoding and encoding to the hardware VideoCore VPU (`/dev/video10` and `/dev/video11`), dropping CPU usage by ~85%, significantly lowering latency and keeping temperatures 15-25°C cooler inside enclosed vehicle cabins. If hardware devices are unavailable or fail to open, it automatically falls back to software.
 
-**The official image is general purpose and does not include the V4L2 codec drivers.** If you want to use the hardware encoder/decoder on a Raspberry Pi, you have to build your own Buildroot image with the required kernel options, packages and `modprobe`; see [the documentation](https://aa-proxy.github.io/docs/config-options#video-overlay-hardware-acceleration) for the details. The hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp`; a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
+On the **Milk-V Duo S** (Sophgo SG2000/SG2002) the hardware H.264 codec is not a V4L2 device: it is reached through the vendor `cvi_mpi` libraries (`libsys`, `libvenc`, `libvdec`). Use `overlay_hw_accel = "cvi"` (or `"auto"`, which tries V4L2 first and then CVI) with a binary built with the `cvi` cargo feature: `CVI_MPI_INC=<cvi_mpi headers> CVI_MPI_LIB=<target libs> cargo build --release --features cvi` (for musl targets also `RUSTFLAGS="-C target-feature=-crt-static"`, the libraries are shared). The target needs the `cvi_vc_driver` kernel modules (`/dev/cvi_vc_enc0`, `/dev/cvi_vc_dec0`), the VPU firmware in `/usr/share/fw_vcodec` and `libatomic`; the Buildroot image for `milkv-duos` provides all of it. Without the feature, or if the devices are missing, aa-proxy-rs falls back to software. Optional tuning through environment variables: `AA_PROXY_CVI_MAX_W`/`AA_PROXY_CVI_MAX_H` (largest video, default 1920x1088), `AA_PROXY_CVI_VB_BLOCKS` (default 12), `AA_PROXY_CVI_BITRATE_KBPS` (CBR mode only, default 4000), `AA_PROXY_CVI_DISPLAY_FRAMES` (decoder display queue, default 0 = no hold-back; every held frame is an access unit the car never ACKs), `AA_PROXY_CVI_PROFILE` (0 baseline, default), `AA_PROXY_CVI_RC` (`cbr` = constant bitrate; default is fixed QP, which keeps static UI sharp), `AA_PROXY_CVI_QP` (fixed QP, default from `h264_encoder_qp`). The encoder SPS/PPS are adapted for strict car head units (CAVLC, Constrained Baseline, zero-latency VUI).
+
+**Raspberry Pi: enabling hardware acceleration.** The official images for the Raspberry Pi 3, 4 and Zero 2 W already contain the `bcm2835-codec` driver (a kernel module, loaded automatically at boot), so there is nothing to build or install. The only thing you have to change yourself is the amount of memory reserved for the GPU/VPU. It is **not** raised in the images by default, because this memory is taken away from Linux (the Zero 2 W has only 512 MB of RAM in total), so do it consciously and only if you want to use the hardware codec:
+
+1. Edit `/uboot/config.txt` (the boot partition is mounted read-write there; you can also edit `config.txt` on the first, FAT partition of the SD card on a PC) and add the following lines at the **very end** of the file:
+   ```
+   [all]
+   gpu_mem=128
+   gpu_mem_512=128
+   gpu_mem_1024=128
+   ```
+   The `[all]` line is needed because the file ends with a model-specific section. `gpu_mem_512` / `gpu_mem_1024` are set explicitly, because the images already define them and they take precedence over a plain `gpu_mem` on boards with 512 MB / 1 GB of RAM.
+2. Reboot and check that the codec devices exist (usually `/dev/video10` is the decoder and `/dev/video11` the encoder): `ls -l /dev/video10 /dev/video11`
+3. Set `overlay_hw_accel = "auto"` in `config.toml`. The log line `V4L2 M2M hardware acceleration enabled` confirms that the hardware codecs are used; otherwise the software pipeline is.
+
+The Raspberry Pi Zero W and Raspberry Pi 5 images do not include the codec driver.
+
+The V4L2 hardware encoder uses a fixed bitrate (4 Mbps) and does not use `h264_encoder_qp` (the CVI encoder uses a fixed QP taken from `h264_encoder_qp`, see above); a single slow hardware frame is dropped, and the software codec takes over only after repeated or fatal hardware errors.
 
 The content and look are controlled live by a JSON file (an [example with all keys and defaults](examples/overlay.json)).
 It is re-read at most every `poll_interval_ms`, so any change, including setting `"text"` to `""`, is applied on the next video frame without reconnecting.
@@ -244,7 +262,10 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `text` | `""` | Text to show; `\r\n`, `\n` and `\r` start a new line. Empty/`null`/missing shows nothing. May contain [HTML styling](#ttf-fonts-and-html-styling). With the built-in font, characters outside ASCII are shown as `?` (except `°`, `ñ` and basic Latin accents) |
 | `font_path` | `""` | Path to a `.ttf` font; when set it takes precedence over `overlay_font_path` from `config.toml` |
 | `poll_interval_ms` | `250` | Minimum interval between reads of the file (min. 20) |
-| `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Distance of the box from the right/bottom edge of the video |
+| `anchor_horizontal` | `"right"` | Horizontal position of the box: `"left"`, `"center"` or `"right"` |
+| `anchor_vertical` | `"bottom"` | Vertical position of the box: `"top"`, `"center"` or `"bottom"` |
+| `offset_x_px`, `offset_y_px` | `100`, `9` | Distance of the box from the anchored edge (left/right and top/bottom respectively); ignored on an axis anchored to `"center"`. The box is always kept inside the video |
+| `box_margin_right_px`, `box_margin_bottom_px` | `100`, `9` | Legacy names of `offset_x_px`/`offset_y_px`, still honored when the new keys are absent (with the default bottom-right anchor this keeps existing configs unchanged) |
 | `box_padding_x_px`, `box_padding_y_px` | `12`, `9` | Padding between box border and text |
 | `box_border_px` | `0` | Border thickness (`0` = none) |
 | `box_opacity_percent` | `0` | Box background opacity (`0` = floating text with shadow only, `100` = solid) |
@@ -255,8 +276,34 @@ Note: an incomplete or invalid JSON is not an error, but the overlay then falls 
 | `max_display_lines`, `max_line_chars` | `14`, `42` | Truncation limits |
 | `h264_encoder_qp` | `26` | Fixed quantizer (0-51); lower = better quality and higher bitrate |
 | `h264_encoder_gop` | `600` | Keyframe interval in frames (extra IDRs are still produced on demand) |
-| `only_main_display` | `true` | Apply only to the main display, not to cluster/auxiliary ones |
+| `only_main_display` | `true` | Apply only to the main display; `false` shows this overlay also on the cluster/auxiliary displays that have no [overlay file of their own](#overlay-on-cluster-and-auxiliary-displays) |
 | `cap_video_fps_to_30` | `true` | Cap `VIDEO_FPS_60` to 30 in the `ServiceDiscoveryResponse` while the overlay is enabled |
+
+#### Overlay on cluster and auxiliary displays
+By default the overlay is drawn only on the main display. A cluster or auxiliary display, injected with
+Display Injection or the head unit's own, can get **its own overlay** from a separate file next to the main one
+(same directory as `overlay_text_path`), named `overlay_<id>.json`:
+
+| Display | `<id>` | Example file (default directory) |
+|---|---|---|
+| injected with Display Injection | the display's id from Display Injection | `/dev/shm/overlay_cluster-1.json`, `/dev/shm/overlay_auxiliary-1.json` |
+| the head unit's own cluster/auxiliary display | `hu-cluster-<display_id>` / `hu-auxiliary-<display_id>` | `/dev/shm/overlay_hu-cluster-1.json` |
+
+The file has the same format and keys as the main one (its own text, position, colors, font, ...) and is
+re-read live in the same way. `overlay_enabled` applies to all displays. The log shows which file every
+display uses (`overlay: registered video channel ... from <file>`), which also tells the ids of the head unit's
+own displays.
+
+Whether a display gets its own overlay is decided when an Android Auto session starts, because every display
+with an overlay has its video re-encoded: **the file has to exist when the phone connects**, and creating or
+removing it applies on the next connection (its content can change at any time, `"text": ""` hides the
+overlay). A display without its own file behaves as before: no overlay, or the main overlay when
+`only_main_display` is `false` in the main file. Every additional display with an overlay needs its own
+decode/encode pipeline, so check the CPU load, especially with the software codec.
+
+The Overlay Editor page of the web interface has a Display selector to edit (and create or remove) these files.
+The same is available through `GET`/`PUT`/`DELETE /overlay?display=<id>`; `GET /overlay/displays` lists the
+displays.
 
 #### Live data templates
 `"text"` may contain `{{name}}` placeholders that `aa-proxy-rs` replaces with live data on every poll, e.g.
@@ -543,6 +590,36 @@ If you prefer to configure hooks manually, you can run:
 
 However, using `setup-dev.sh` is the recommended approach.
 
+### Previewing the web interface
+You can work on the embedded web interface on your own computer, without
+building an image or running aa-proxy-rs on a device. Run this from the
+repository root:
+
+```sh
+cargo run --example dashboard-preview
+```
+
+and open http://127.0.0.1:8088 in a browser.
+
+The preview is a small web server (`examples/dashboard-preview.rs`) that
+renders the dashboard the same way as aa-proxy-rs does, with these
+differences:
+- The files in `static/` (`index.html`, `styles.css`, the page scripts
+  `*.js`, `config.json`, ...) are read on every request, so after you edit
+  them you only need to refresh the page. Changes to Rust code (for example
+  the config page renderer in `src/web.rs`) need a new `cargo run`.
+- The configuration starts from `../WebUI/web-dev/config.toml` if that file
+  exists, otherwise from the defaults. Saving it only changes the copy in
+  memory.
+- Nothing is done on the host: restart, reboot, key presses, uploads and all
+  other actions only print a `[preview]` line on the console and return
+  `OK`. Pages that show data from a running proxy (Overlay Editor, WASM
+  Store, SDR UI, SDR Info, Display Injection) therefore show no real data
+  and may report errors.
+
+The example uses the aa-proxy-rs library, so the first build needs the same
+build dependencies (e.g. OpenSSL development files) as aa-proxy-rs itself.
+
 ## Similar/other open source AndroidAuto-related projects
 - https://github.com/nisargjhaveri/WirelessAndroidAutoDongle
 - https://github.com/nisargjhaveri/AAWirelessGateway
@@ -552,3 +629,54 @@ However, using `setup-dev.sh` is the recommended approach.
 - https://github.com/f1xpl/openauto
 - https://github.com/gamelaster/opengal_proxy
 - https://github.com/tomasz-grobelny/AACS
+
+## Upload WASM hooks
+
+With `wasm-scripting` enabled, the dashboard lists hooks in the active
+`wasm_hooks_dir`. Use **Upload hook** to add or replace a hook, **Delete** to
+remove it, and **Refresh** to read its load state. Changing the configured
+directory requires a restart; uploads use the directory the engine watches.
+
+The same actions are available through HTTP:
+
+```sh
+curl -X PUT --data-binary @exlap_hook.wasm http://localhost:8080/wasm-hooks/exlap_hook.wasm
+curl http://localhost:8080/wasm-hooks
+curl -X DELETE http://localhost:8080/wasm-hooks/exlap_hook.wasm
+```
+
+`PUT /wasm-hooks/{name}` accepts raw WebAssembly bytes, up to 16 MiB, with a
+WebAssembly header. Use a plain `.wasm` file name with ASCII letters, digits, dots,
+hyphens or underscores, starting with a letter or digit. Path parts are
+refused. The server writes a temporary file and renames it after the upload
+is complete. The watcher then loads it. Upload success does not prove load
+success: `GET /wasm-hooks` reports `name`, `size`, `loaded` and `error` for
+each file. The engine must be running for these routes to accept requests.
+Only upload hooks you trust: they execute with the configured hook limits.
+
+## Battery data from a WebSocket topic
+
+`battery` is a reserved input topic. Its payload is a JSON string containing
+the same `BatteryData` object accepted by `POST /battery`. A hook can call
+`send-ws-event("battery", payload)`. A `/ws` client can send:
+
+```json
+{"type":"script_event","topic":"battery","payload":"{\"battery_level_percentage\":75,\"battery_capacity_wh\":50000}"}
+```
+
+Or publish the same event through HTTP:
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"topic":"battery","payload":"{\"battery_level_percentage\":75}"}' http://localhost:8080/raw-topic-data
+```
+
+The process consumes each event once, independent of browser subscriptions
+and overlay settings. It uses the same validation and EV model sender as
+`POST /battery`: a level in percent (0 through 100) or a level in Wh is
+required. Invalid JSON or battery values are refused and logged. NaN and
+infinite values are refused on both routes. Because the topic is reserved,
+a `script_event` on `battery` is not passed to the `ws-script-handler` of
+the loaded hooks. A connected
+Android Auto sensor channel is required to send the EV packet. In web-only
+mode, the log confirms receipt and reports that no sensor channel exists;
+this does not prove delivery to a phone.

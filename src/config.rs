@@ -184,6 +184,8 @@ impl BtScoMediaBridgeLimiter {
 pub enum BtScoMediaBridgeResampler {
     Repeat,
     Linear,
+    /// Windowed-sinc 6x upsampling + low-shelf boost + soft high-frequency exciter (voice "enhanced").
+    Enhanced,
 }
 
 impl Default for BtScoMediaBridgeResampler {
@@ -197,6 +199,7 @@ impl Display for BtScoMediaBridgeResampler {
         f.write_str(match self {
             Self::Repeat => "repeat",
             Self::Linear => "linear",
+            Self::Enhanced => "enhanced",
         })
     }
 }
@@ -251,6 +254,8 @@ pub enum OverlayHwAccel {
     None,
     Auto,
     V4l2,
+    /// Sophgo SG2000/SG2002 (Milk-V Duo S) hardware codec through the vendor cvi_mpi libraries.
+    Cvi,
 }
 
 impl Default for OverlayHwAccel {
@@ -265,6 +270,7 @@ impl Display for OverlayHwAccel {
             Self::None => "none",
             Self::Auto => "auto",
             Self::V4l2 => "v4l2",
+            Self::Cvi => "cvi",
         })
     }
 }
@@ -278,9 +284,10 @@ impl<'de> Deserialize<'de> for OverlayHwAccel {
         match s.trim().to_ascii_lowercase().as_str() {
             "auto" => Ok(Self::Auto),
             "v4l2" | "hardware" | "hw" => Ok(Self::V4l2),
+            "cvi" => Ok(Self::Cvi),
             "none" | "software" | "sw" | "" => Ok(Self::None),
             other => Err(serde::de::Error::custom(format!(
-                "invalid overlay_hw_accel: '{other}', expected 'none', 'auto', or 'v4l2'"
+                "invalid overlay_hw_accel: '{other}', expected 'none', 'auto', 'v4l2', or 'cvi'"
             ))),
         }
     }
@@ -645,8 +652,9 @@ pub struct AppConfig {
     )]
     pub overlay_font_path: PathBuf,
     /// Hardware acceleration backend for the video overlay:
-    /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs),
-    /// or `v4l2` (force V4L2 M2M hardware codecs with software fallback).
+    /// `none` (default, pure-Rust software), `auto` (auto-detect V4L2 M2M hardware codecs, then
+    /// the Sophgo CVI codec), `v4l2` (force V4L2 M2M hardware codecs with software fallback)
+    /// or `cvi` (force the Sophgo SG2000/SG2002 hardware codec with software fallback).
     #[serde(default)]
     pub overlay_hw_accel: OverlayHwAccel,
     /// Explicit V4L2 M2M decoder device path (e.g. `/dev/video10`).
@@ -678,6 +686,12 @@ pub struct AppConfig {
     )]
     pub webserver: Option<String>,
     pub bt_timeout_secs: u16,
+    /// Longest wait (seconds) between rounds of Bluetooth connection attempts to the known phone.
+    /// The wait doubles from 1 s up to this value; lower = the Pi insists more often. Default: 15.
+    pub bt_connect_max_delay_secs: u16,
+    /// Per-attempt limit (seconds, 0 = off) when the Pi connects to the known phone: abort a pending
+    /// attempt after this long instead of the built-in 20 s. Clamped to 5-20. Default: 0.
+    pub bt_connect_attempt_timeout_secs: u16,
     pub mitm: bool,
     /// TLS backend used for MITM: "rustls" (default) or "openssl".
     /// rustls suits modern head units. Use "openssl" for legacy head units that
@@ -743,6 +757,17 @@ pub struct AppConfig {
     /// Default false keeps injected streams idle until a tap client connects.
     #[serde(default)]
     pub inject_force_focus_without_tap: bool,
+    /// When a media tap client connects to a real (HU-advertised) video channel
+    /// (main, cluster or auxiliary), send the phone an unsolicited
+    /// VIDEO_FOCUS_NOTIFICATION native→projected toggle so it emits a fresh IDR
+    /// right away, instead of the client waiting for the phone's next natural
+    /// keyframe (~60 s observed). Same mechanism already used for injected
+    /// displays, but here the real head unit is also showing that stream, so it
+    /// may see a brief stream restart (flicker/black frame). Skipped while the HU
+    /// itself holds NATIVE focus, and rate-limited per channel.
+    /// Experimental, tested on a single HU. Default: false.
+    #[serde(default)]
+    pub media_tap_keyframe_toggle: bool,
     pub change_usb_order: bool,
     pub stop_on_disconnect: bool,
     pub waze_lht_workaround: bool,
@@ -752,6 +777,13 @@ pub struct AppConfig {
     /// units/car configurations. Independent of waze_lht_workaround. Default: false.
     #[serde(default)]
     pub roundabout_angle_synthesis_enabled: bool,
+    /// Inject a synthetic navigation_status_service into the ServiceDiscoveryResponse when the
+    /// HU does not advertise one. The phone then sends navigation state and VehicleEnergyForecast
+    /// (0x8008) on it; the channel is answered and consumed locally (never reaches the HU), so the
+    /// forecast is still published on the `vehicle_energy_forecast` websocket topic and WASM hooks
+    /// see the navigation messages. Default: false.
+    #[serde(default)]
+    pub inject_navigation_status: bool,
     #[serde(default, deserialize_with = "empty_string_as_none")]
     pub ev_battery_logger: Option<String>,
     pub ev_connector_types: EvConnectorTypes,
@@ -858,6 +890,14 @@ pub struct AppConfig {
     /// should keep routing call audio to aa-proxy-rs instead of dropping BT after
     /// the AA Wi-Fi setup phase.
     pub bt_sco_keep_bluetooth_alive: bool,
+    /// Keep the HSP control stream from the phone open and answer its AT commands with `OK`
+    /// (instead of dropping it), so Android treats aa-proxy-rs as a headset and routes call audio
+    /// to the SCO listener. Needs `bt_sco`; read at startup. Default: false.
+    pub bt_sco_hsp_responder: bool,
+    /// With `bt_sco_media_bridge_start_on_first_audio`, start the media bridge anyway after the
+    /// start timeout even if the SCO downlink is still silent. Turn off to keep voice recording
+    /// (SCO with no far-end audio) from touching the media channel. Default: true.
+    pub bt_sco_media_bridge_start_on_timeout: bool,
     /// Experimental downlink bridge: SCO call audio -> AA PCM media sink.
     /// Disabled by default. Requires `mitm = true`.
     pub bt_sco_media_bridge: bool,
@@ -901,6 +941,9 @@ pub struct AppConfig {
     /// on some HUs, but is disabled by default to preserve the proven behavior.
     pub bt_sco_media_bridge_fixed_cadence: bool,
     /// Fixed DATA cadence in milliseconds when fixed cadence is enabled.
+    /// 0 (default) paces each packet by its own audio duration, which always
+    /// matches the SCO rate. A non-zero value must match the chunk duration,
+    /// otherwise the buffer drains (underruns) or grows (latency).
     pub bt_sco_media_bridge_cadence_ms: u32,
     /// Minimum converted-audio buffer before the first fixed-cadence DATA packet.
     pub bt_sco_media_bridge_jitter_buffer_ms: u32,
@@ -910,7 +953,8 @@ pub struct AppConfig {
     /// Send AA MEDIA_MESSAGE_MICROPHONE_REQUEST open/close while SCO is connected.
     /// Keep enabled for the first mic test; disable to observe/passively log mic frames only.
     pub bt_sco_mic_request: bool,
-    /// Maximum 60-byte SCO uplink packets buffered for the mic bridge.
+    /// Hard limit of 60-byte SCO uplink packets buffered for the mic bridge.
+    /// The standing latency is trimmed automatically; this only caps bursts.
     pub bt_sco_mic_uplink_ring_capacity: usize,
     /// Echo handling for the microphone uplink. `off` preserves the current
     /// proven path; `ducking` lowers mic gain while downlink audio is active.
@@ -1140,6 +1184,8 @@ impl Default for AppConfig {
             timeout_secs: 10,
             webserver: webserver_default_bind(),
             bt_timeout_secs: 120,
+            bt_connect_max_delay_secs: 15,
+            bt_connect_attempt_timeout_secs: 0,
             mitm: false,
             tls_backend: "rustls".into(),
             dpi: 0,
@@ -1180,10 +1226,12 @@ impl Default for AppConfig {
             inject_aux_touch_width: 1280,
             inject_aux_touch_height: 720,
             inject_force_focus_without_tap: false,
+            media_tap_keyframe_toggle: false,
             change_usb_order: false,
             stop_on_disconnect: false,
             waze_lht_workaround: false,
             roundabout_angle_synthesis_enabled: false,
+            inject_navigation_status: false,
             ev_battery_logger: None,
             action_requested: None,
             ev_connector_types: EvConnectorTypes::default(),
@@ -1236,6 +1284,8 @@ impl Default for AppConfig {
             hu_button_handler: None,
             bt_sco: false,
             bt_sco_keep_bluetooth_alive: true,
+            bt_sco_hsp_responder: false,
+            bt_sco_media_bridge_start_on_timeout: true,
             bt_sco_media_bridge: false,
             bt_sco_media_bridge_audio_type: BtScoMediaBridgeAudioType::Media,
             bt_sco_media_bridge_gain_percent: 300,
@@ -1248,7 +1298,7 @@ impl Default for AppConfig {
             bt_sco_media_bridge_start_timeout_ms: 5000,
             bt_sco_media_bridge_stop_existing_on_disconnect: true,
             bt_sco_media_bridge_fixed_cadence: false,
-            bt_sco_media_bridge_cadence_ms: 22,
+            bt_sco_media_bridge_cadence_ms: 0,
             bt_sco_media_bridge_jitter_buffer_ms: 60,
             bt_sco_mic_bridge: false,
             bt_sco_mic_request: true,
@@ -1506,6 +1556,8 @@ impl AppConfig {
             doc["webserver"] = value(webserver);
         }
         doc["bt_timeout_secs"] = value(self.bt_timeout_secs as i64);
+        doc["bt_connect_max_delay_secs"] = value(self.bt_connect_max_delay_secs as i64);
+        doc["bt_connect_attempt_timeout_secs"] = value(self.bt_connect_attempt_timeout_secs as i64);
         doc["mitm"] = value(self.mitm);
         doc["tls_backend"] = value(self.tls_backend.to_string());
         doc["dpi"] = value(self.dpi as i64);
@@ -1547,10 +1599,12 @@ impl AppConfig {
         doc["inject_aux_touch_width"] = value(self.inject_aux_touch_width as i64);
         doc["inject_aux_touch_height"] = value(self.inject_aux_touch_height as i64);
         doc["inject_force_focus_without_tap"] = value(self.inject_force_focus_without_tap);
+        doc["media_tap_keyframe_toggle"] = value(self.media_tap_keyframe_toggle);
         doc["change_usb_order"] = value(self.change_usb_order);
         doc["stop_on_disconnect"] = value(self.stop_on_disconnect);
         doc["waze_lht_workaround"] = value(self.waze_lht_workaround);
         doc["roundabout_angle_synthesis_enabled"] = value(self.roundabout_angle_synthesis_enabled);
+        doc["inject_navigation_status"] = value(self.inject_navigation_status);
         if let Some(path) = &self.ev_battery_logger {
             doc["ev_battery_logger"] = value(path);
         }
@@ -1603,6 +1657,9 @@ impl AppConfig {
         }
         doc["bt_sco"] = value(self.bt_sco);
         doc["bt_sco_keep_bluetooth_alive"] = value(self.bt_sco_keep_bluetooth_alive);
+        doc["bt_sco_hsp_responder"] = value(self.bt_sco_hsp_responder);
+        doc["bt_sco_media_bridge_start_on_timeout"] =
+            value(self.bt_sco_media_bridge_start_on_timeout);
         doc["bt_sco_media_bridge"] = value(self.bt_sco_media_bridge);
         doc["bt_sco_media_bridge_audio_type"] =
             value(self.bt_sco_media_bridge_audio_type.to_string());

@@ -13,6 +13,7 @@ pub mod companion_protocol;
 pub mod config;
 pub mod config_types;
 pub mod crash;
+pub mod cvi_codec;
 pub mod device_info;
 pub mod display;
 pub mod ev;
@@ -33,11 +34,13 @@ pub mod mitm_prettyprint;
 pub mod mpegts;
 pub mod mtp;
 pub mod overlay;
+pub mod overlay_data_api;
 pub mod overlay_vars;
 pub mod packet_fragment;
 pub mod proxy;
 #[cfg(feature = "wasm-scripting")]
 pub mod script_wasm;
+pub mod sdr_snapshot;
 pub mod sdr_ui;
 pub mod sdr_ui_preview;
 pub mod ssl;
@@ -49,4 +52,6 @@ pub mod v4l2_m2m;
 pub mod vendor_ext;
 #[cfg(feature = "wasm-scripting")]
 pub mod wasm_config;
+#[cfg(feature = "wasm-scripting")]
+pub mod wasm_hooks_web;
 pub mod web;

@@ -8,7 +8,7 @@ use aa_proxy_rs::config::WifiConfig;
 use aa_proxy_rs::config::{Action, AppConfig, TCP_SERVER_PORT};
 use aa_proxy_rs::crash;
 use aa_proxy_rs::device_info;
-use aa_proxy_rs::ev::BatteryData;
+use aa_proxy_rs::ev::{spawn_battery_topic_collector, BatteryData};
 use aa_proxy_rs::led::{LedManager, LedStatus};
 use aa_proxy_rs::mitm::send_byebye;
 use aa_proxy_rs::mitm::OdometerData;
@@ -828,6 +828,22 @@ async fn tokio_main(
         );
     }
 
+    aa_proxy_rs::bt_sco_media_bridge::START_ON_TIMEOUT.store(
+        cfg.bt_sco_media_bridge_start_on_timeout,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    aa_proxy_rs::bluetooth::BT_CONNECT_ATTEMPT_TIMEOUT_SECS.store(
+        cfg.bt_connect_attempt_timeout_secs as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    aa_proxy_rs::bluetooth::BT_CONNECT_MAX_DELAY_SECS.store(
+        cfg.bt_connect_max_delay_secs as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    aa_proxy_rs::bluetooth::BT_SCO_HSP_RESPONDER.store(
+        cfg.bt_sco && cfg.bt_sco_hsp_responder,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     if cfg.bt_sco && !web_only {
         match bt_sco::spawn(BtScoOptions {
             bridge_aa_media_pcm: cfg.bt_sco_media_bridge,
@@ -1647,6 +1663,12 @@ fn main() -> Result<()> {
     {
         let _guard = runtime.enter();
         aa_proxy_rs::overlay_vars::spawn_ws_collector(ws_event_tx.subscribe());
+        spawn_battery_topic_collector(
+            ws_event_tx.subscribe(),
+            tx.clone(),
+            sensor_channel.clone(),
+            last_battery_data.clone(),
+        );
     }
 
     // heartbeat updated by scheduler_probe[0], watched by a plain OS thread

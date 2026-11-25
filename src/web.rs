@@ -12,7 +12,7 @@ use crate::config::SharedConfigJson;
 use crate::config::BASE_CONFIG_DIR;
 use crate::crash;
 use crate::device_info;
-use crate::ev::send_ev_data;
+use crate::ev::receive_battery_data;
 use crate::ev::BatteryData;
 use crate::ev::EV_MODEL_FILE;
 use crate::inject_displays;
@@ -31,11 +31,16 @@ use crate::mitm::SharedServiceDiscoveryResponse;
 use crate::mitm::{send_odometer_data, OdometerData};
 use crate::mitm::{send_tire_pressure_data, TirePressureData};
 use crate::mitm::{SharedCompanionIp, SharedMediaChannels, SharedMediaTapEndpoints};
+use crate::overlay::OverlayConfig;
+use crate::overlay_data_api;
 use crate::proxy::media_tap_reverse_bridge_once;
 #[cfg(feature = "wasm-scripting")]
 use crate::script_wasm::{LoadedScript, ScriptRegistry};
+use crate::sdr_snapshot;
 use crate::sdr_ui;
 use crate::sdr_ui_preview;
+#[cfg(feature = "wasm-scripting")]
+use crate::wasm_hooks_web;
 #[cfg(not(feature = "wasm-scripting"))]
 type ScriptRegistry = ();
 use axum::{
@@ -83,6 +88,13 @@ use toml_edit::{value, DocumentMut};
 const TEMPLATE: &str = include_str!("../static/index.html");
 const PICO_CSS: &str = include_str!("../static/pico.min.css");
 const STYLES_CSS: &str = include_str!("../static/styles.css");
+const DASHBOARD_PAGES_JS: &str = include_str!("../static/dashboard-pages.js");
+const OVERLAY_EDITOR_JS: &str = include_str!("../static/overlay-editor.js");
+const OVERLAY_DYNAMIC_JS: &str = include_str!("../static/overlay-dynamic.js");
+const WASM_STORE_JS: &str = include_str!("../static/wasm-store.js");
+const SDR_PROFILES_WEB_JS: &str = include_str!("../static/sdr-profiles-web.js");
+const SDR_INFO_WEB_JS: &str = include_str!("../static/sdr-info-web.js");
+const DISPLAY_INJECTION_WEB_JS: &str = include_str!("../static/display-injection-web.js");
 const LOGO_WEBP: &[u8] = include_bytes!("../static/aa-proxy-rs.webp");
 const AA_PROXY_RS_URL: &str = "https://github.com/aa-proxy/aa-proxy-rs";
 const BUILDROOT_URL: &str = "https://github.com/aa-proxy/buildroot";
@@ -164,12 +176,28 @@ pub struct AppState {
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/", get(index))
         .route("/config", get(get_config).post(set_config))
         .route("/config-entry", post(update_config_entry))
         .route("/config-data", get(get_config_data))
         .route("/config-data-tree", get(get_config_data_tree))
+        .route(
+            "/overlay",
+            get(overlay_get_handler)
+                .put(overlay_put_handler)
+                .delete(overlay_delete_handler),
+        )
+        // Dedicated authenticated telemetry ingestion; existing /overlay and
+        // legacy /raw-topic-data paths are intentionally preserved.
+        .route(
+            "/overlay/data",
+            get(overlay_data_api::get_data)
+                .post(overlay_data_api::post_data)
+                .layer(axum::extract::DefaultBodyLimit::max(16 * 1024)),
+        )
+        .route("/ws/overlay", get(overlay_data_api::websocket))
+        .route("/overlay/displays", get(overlay_displays_handler))
         .route(
             "/map-album-art",
             post(map_album_art_upload_handler)
@@ -257,8 +285,10 @@ pub fn app(state: Arc<AppState>) -> Router {
             get(bt_known_devices_handler).delete(bt_forget_known_devices_handler),
         )
         .route("/disconnect", post(disconnect_handler))
-        .route("/aa-proxy-rs.webp", get(logo_handler))
-        .with_state(state)
+        .route("/aa-proxy-rs.webp", get(logo_handler));
+    #[cfg(feature = "wasm-scripting")]
+    let router = wasm_hooks_web::routes(router);
+    router.with_state(state)
 }
 
 fn linkify_git_info(git_date: &str, git_hash: &str) -> String {
@@ -297,6 +327,13 @@ fn linkify_git_info(git_date: &str, git_hash: &str) -> String {
         // format not recognized, use without links
         format!("{}-{}", git_date, git_hash)
     }
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn replace_backticks(s: String) -> String {
@@ -368,7 +405,9 @@ fn render_section(section: &ConfigValues, depth: usize, html: &mut String) {
 }
 
 fn render_field(key: &str, val: &ConfigValue, html: &mut String) {
-    let desc = replace_backticks(val.description.replace('\n', "<br>"));
+    // Escape first: descriptions are plain text and may mention literal tags
+    // such as `<b>` or placeholders like `<subnet>`.
+    let desc = replace_backticks(escape_html(&val.description).replace('\n', "<br>"));
 
     // Any non-multiselect field with a `values` list renders as a
     // single-select dropdown, regardless of typ. `data-typ` is recorded so
@@ -513,6 +552,13 @@ async fn index(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         )
         .replace("{PICO_CSS}", PICO_CSS)
         .replace("{STYLES_CSS}", STYLES_CSS)
+        .replace("{DASHBOARD_PAGES_JS}", DASHBOARD_PAGES_JS)
+        .replace("{OVERLAY_EDITOR_JS}", OVERLAY_EDITOR_JS)
+        .replace("{OVERLAY_DYNAMIC_JS}", OVERLAY_DYNAMIC_JS)
+        .replace("{WASM_STORE_JS}", WASM_STORE_JS)
+        .replace("{SDR_PROFILES_WEB_JS}", SDR_PROFILES_WEB_JS)
+        .replace("{SDR_INFO_WEB_JS}", SDR_INFO_WEB_JS)
+        .replace("{DISPLAY_INJECTION_WEB_JS}", DISPLAY_INJECTION_WEB_JS)
         .replace("{CONFIG_VALUES}", &render_config_values(&config_json))
         .replace("{CONFIG_IDS}", &render_config_ids(&config_json))
         .replace("{LOGO_URL}", "/aa-proxy-rs.webp");
@@ -646,41 +692,17 @@ pub async fn battery_handler(
     State(state): State<Arc<AppState>>,
     Json(data): Json<BatteryData>,
 ) -> impl IntoResponse {
-    match data.battery_level_percentage {
-        Some(level) => {
-            if level < 0.0 || level > 100.0 {
-                let msg = format!(
-                    "battery_level_percentage out of range: {} (expected 0.0–100.0)",
-                    level
-                );
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-        }
-        None => {
-            if data.battery_level_wh.is_none() {
-                let msg = format!(
-                    "Either `battery_level_percentage` or `battery_level_wh` has to be set",
-                );
-                return (StatusCode::BAD_REQUEST, msg).into_response();
-            }
-        }
+    match receive_battery_data(
+        data,
+        &state.tx,
+        &state.sensor_channel,
+        state.last_battery_data.clone(),
+    )
+    .await
+    {
+        Ok(()) => (StatusCode::OK, "OK").into_response(),
+        Err(message) => (StatusCode::BAD_REQUEST, message).into_response(),
     }
-
-    info!("{} Received battery data: {:?}", NAME, data);
-
-    if let Some(ch) = *state.sensor_channel.lock().await {
-        if let Some(tx) = state.tx.lock().await.clone() {
-            if let Err(e) =
-                send_ev_data(tx.clone(), ch, data, state.last_battery_data.clone()).await
-            {
-                error!("{} EV model error: {}", NAME, e);
-            }
-        }
-    } else {
-        warn!("{} Not sending packet because no sensor channel yet", NAME);
-    }
-
-    (StatusCode::OK, "OK").into_response()
 }
 
 async fn battery_status_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -1938,18 +1960,45 @@ async fn media_tap_open_handler(
 async fn service_discovery_response_handler(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    let data = state.last_service_discovery_response.read().await;
-    if let Some(value) = data.clone() {
-        Json(value).into_response()
-    } else {
-        (
+    // The existing JSON response shape stays unchanged for Companion clients.
+    if let Some(value) = state.last_service_discovery_response.read().await.clone() {
+        return (
+            [("cache-control", "no-store"), ("x-sdr-source", "memory")],
+            Json(value),
+        )
+            .into_response();
+    }
+    // First request after aa-proxy-rs restart, or when AA is disconnected.
+    match sdr_snapshot::load().await {
+        Ok(Some(value)) => (
+            [("cache-control", "no-store"), ("x-sdr-source", "disk")],
+            Json(value),
+        )
+            .into_response(),
+        Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(json!({
                 "error": "service_discovery_response_not_available",
-                "message": "No ServiceDiscoveryResponse has been observed yet"
+                "message": "No ServiceDiscoveryResponse has been observed or saved yet"
             })),
         )
-            .into_response()
+            .into_response(),
+        Err(e) => {
+            warn!(
+                "{} failed to load saved SDR from {}: {}",
+                NAME,
+                sdr_snapshot::LAST_SDR_PATH,
+                e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "error": "service_discovery_response_cache_error",
+                    "message": "Saved SDR could not be read"
+                })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1968,6 +2017,354 @@ async fn logo_handler() -> impl IntoResponse {
         .header(header::CACHE_CONTROL, "public, max-age=604800, immutable")
         .body(Body::from(LOGO_WEBP))
         .unwrap()
+}
+
+// The companion edits the same live file that the encoder polls. This endpoint does
+// not make assumptions about a particular device's overlay_text_path.
+#[derive(Debug, Serialize)]
+struct OverlayApiResponse {
+    enabled: bool,
+    /// "main", or the id of a display with its own overlay file.
+    display: String,
+    text_path: String,
+    /// Whether the overlay file exists. A display without its own file has no overlay of its
+    /// own (or shows the main one with only_main_display = false).
+    exists: bool,
+    overlay: OverlayConfig,
+    // Enabling/disabling the video transform is latched per AA session.
+    reconnect_required_for_enable_change: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct OverlayApiUpdate {
+    enabled: bool,
+    overlay: OverlayConfig,
+}
+
+/// `?display=<id>` selects the overlay file of a non-main display; missing or `main` is the
+/// main overlay file.
+#[derive(Debug, Deserialize)]
+struct OverlayQuery {
+    display: Option<String>,
+}
+
+const MAIN_OVERLAY_DISPLAY: &str = "main";
+
+fn overlay_file_path(config: &AppConfig) -> PathBuf {
+    let path = config.overlay_text_path.to_string_lossy();
+    if path.trim().is_empty() {
+        PathBuf::from(crate::config::DEFAULT_OVERLAY_TEXT_PATH)
+    } else {
+        PathBuf::from(path.trim())
+    }
+}
+
+/// `(display id, overlay file path)` selected by `query`.
+fn overlay_target(
+    config: &AppConfig,
+    query: &OverlayQuery,
+) -> std::result::Result<(String, PathBuf), axum::response::Response> {
+    let main_path = overlay_file_path(config);
+    match query.display.as_deref().map(str::trim) {
+        None | Some("") | Some(MAIN_OVERLAY_DISPLAY) => {
+            Ok((MAIN_OVERLAY_DISPLAY.to_string(), main_path))
+        }
+        Some(id) => match crate::overlay::display_overlay_path(&main_path, id) {
+            Some(path) => Ok((id.to_string(), path)),
+            None => Err((
+                StatusCode::BAD_REQUEST,
+                "display must be 1-64 characters: lowercase letters, digits, - or _",
+            )
+                .into_response()),
+        },
+    }
+}
+
+async fn overlay_get_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
+) -> impl IntoResponse {
+    let cfg = state.config.read().await;
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let mut overlay = OverlayConfig::default();
+    let mut exists = true;
+    match fs::read_to_string(&path).await {
+        Ok(raw) => {
+            if raw.len() > 32 * 1024 {
+                return (StatusCode::PAYLOAD_TOO_LARGE, "Overlay file exceeds 32 KiB")
+                    .into_response();
+            }
+            if raw.trim_start().starts_with('{') {
+                overlay = match serde_json::from_str::<OverlayConfig>(&raw) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        return (
+                            StatusCode::UNPROCESSABLE_ENTITY,
+                            format!("Invalid overlay JSON: {err}"),
+                        )
+                            .into_response();
+                    }
+                };
+            } else {
+                // The encoder also supports a plain-text overlay file.
+                overlay.text = raw;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => exists = false,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot read overlay file: {err}"),
+            )
+                .into_response();
+        }
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        display,
+        text_path: path.to_string_lossy().into_owned(),
+        exists,
+        overlay,
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
+}
+
+/// Removes the overlay file of a non-main display, so it has no overlay of its own after the
+/// next Android Auto connection. The main overlay file cannot be removed.
+async fn overlay_delete_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
+) -> impl IntoResponse {
+    let cfg = state.config.write().await;
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    if display == MAIN_OVERLAY_DISPLAY {
+        return (
+            StatusCode::BAD_REQUEST,
+            "The main overlay file cannot be removed",
+        )
+            .into_response();
+    }
+    match fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Cannot remove overlay file: {err}"),
+            )
+                .into_response();
+        }
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        display,
+        text_path: path.to_string_lossy().into_owned(),
+        exists: false,
+        overlay: OverlayConfig::default(),
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
+}
+
+#[derive(Debug, Serialize)]
+struct OverlayDisplayInfo {
+    id: String,
+    label: String,
+    text_path: String,
+    exists: bool,
+}
+
+/// Displays an overlay can be edited for: the main display, the displays configured in Display
+/// Injection, and every display that already has an overlay file (e.g. `hu-cluster-<n>`).
+async fn overlay_displays_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let (main_path, inject_displays_file) = {
+        let cfg = state.config.read().await;
+        (overlay_file_path(&cfg), cfg.inject_displays_file.clone())
+    };
+    let mut displays = vec![OverlayDisplayInfo {
+        id: MAIN_OVERLAY_DISPLAY.to_string(),
+        label: "Main display".to_string(),
+        text_path: main_path.to_string_lossy().into_owned(),
+        exists: fs::metadata(&main_path).await.is_ok(),
+    }];
+    let mut ids = Vec::new();
+    if let Ok(response) = inject_displays::list_displays(inject_displays_file).await {
+        for display in response.displays {
+            let kind = match display.display_type {
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_CLUSTER => "Cluster",
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_AUXILIARY => "Auxiliary",
+                crate::mitm::protos::DisplayType::DISPLAY_TYPE_MAIN => "Main",
+            };
+            ids.push((display.id.clone(), format!("{} ({kind})", display.name)));
+        }
+    }
+    // Overlay files of other displays (e.g. the head unit's own cluster).
+    if let Some(dir) = main_path.parent() {
+        let dir = if dir.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            dir
+        };
+        if let Ok(mut entries) = fs::read_dir(dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let Some(id) = name
+                    .strip_prefix("overlay_")
+                    .and_then(|rest| rest.strip_suffix(".json"))
+                else {
+                    continue;
+                };
+                if crate::overlay::valid_display_overlay_id(id)
+                    && !ids.iter().any(|(known, _)| known == id)
+                {
+                    ids.push((id.to_string(), id.to_string()));
+                }
+            }
+        }
+    }
+    for (id, label) in ids {
+        let Some(path) = crate::overlay::display_overlay_path(&main_path, &id) else {
+            continue;
+        };
+        displays.push(OverlayDisplayInfo {
+            exists: fs::metadata(&path).await.is_ok(),
+            id,
+            label,
+            text_path: path.to_string_lossy().into_owned(),
+        });
+    }
+    Json(displays).into_response()
+}
+
+async fn overlay_put_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<OverlayQuery>,
+    Json(update): Json<OverlayApiUpdate>,
+) -> impl IntoResponse {
+    let c = &update.overlay;
+    if c.text.len() > 8192
+        || c.poll_interval_ms < 20
+        || c.text_scale == 0
+        || c.text_scale > 128
+        || c.max_display_lines == 0
+        || c.max_display_lines > 64
+        || c.max_line_chars == 0
+        || c.max_line_chars > 256
+        || c.box_opacity_percent > 100
+        || c.h264_encoder_qp > 51
+        || c.h264_encoder_gop == 0
+        || c.box_padding_x_px > 2048
+        || c.box_padding_y_px > 2048
+        || c.offset_x_px.unwrap_or(0) > 8192
+        || c.offset_y_px.unwrap_or(0) > 8192
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Overlay values are outside supported limits",
+        )
+            .into_response();
+    }
+
+    // Serialize all companion writes (including enabled flag changes) against
+    // config-entry updates by taking the same shared config write lock.
+    let mut cfg = state.config.write().await;
+    let (display, path) = match overlay_target(&cfg, &query) {
+        Ok(target) => target,
+        Err(response) => return response,
+    };
+    let raw = match serde_json::to_vec_pretty(&update.overlay) {
+        Ok(raw) => raw,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("Cannot encode overlay: {err}"),
+            )
+                .into_response()
+        }
+    };
+
+    // Prepare the config update before writing either file. The key may be absent
+    // from older config.toml files, so insert it rather than using /config-entry.
+    let enabled_changed = cfg.overlay_enabled != update.enabled;
+    let config_update = if enabled_changed {
+        let config_path = state.config_file.as_ref();
+        let raw_cfg = match fs::read_to_string(config_path).await {
+            Ok(raw) => raw,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot read config.toml: {err}"),
+                )
+                    .into_response()
+            }
+        };
+        let mut doc = match raw_cfg.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Cannot parse config.toml: {err}"),
+                )
+                    .into_response()
+            }
+        };
+        doc["overlay_enabled"] = value(update.enabled);
+        Some(doc.to_string())
+    } else {
+        None
+    };
+
+    // Atomic rename keeps the encoder from observing a partially written JSON.
+    let Some(filename) = path.file_name() else {
+        return (StatusCode::BAD_REQUEST, "Invalid overlay file path").into_response();
+    };
+    let temp_path = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        filename.to_string_lossy(),
+        std::process::id()
+    ));
+    if let Err(err) = fs::write(&temp_path, raw).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Cannot write overlay temporary file: {err}"),
+        )
+            .into_response();
+    }
+    if let Err(err) = fs::rename(&temp_path, &path).await {
+        let _ = fs::remove_file(&temp_path).await;
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Cannot replace overlay file: {err}"),
+        )
+            .into_response();
+    }
+
+    if let Some(toml_text) = config_update {
+        if let Err(err) = fs::write(state.config_file.as_ref(), toml_text).await {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Overlay JSON saved, but failed to update config.toml: {err}"),
+            )
+                .into_response();
+        }
+        cfg.overlay_enabled = update.enabled;
+    }
+    Json(OverlayApiResponse {
+        enabled: cfg.overlay_enabled,
+        display,
+        text_path: path.to_string_lossy().into_owned(),
+        exists: true,
+        overlay: update.overlay,
+        reconnect_required_for_enable_change: true,
+    })
+    .into_response()
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -2361,6 +2758,11 @@ async fn run_wasm_ws_hooks(
     payload: String,
     state: Arc<AppState>,
 ) -> Result<Option<String>> {
+    // Battery is a reserved input topic. Only the process-wide collector
+    // consumes it; per-client hooks must not republish it.
+    if topic == "battery" {
+        return Ok(None);
+    }
     let Some(registry) = state.script_registry.clone() else {
         return Ok(None);
     };
@@ -2698,5 +3100,32 @@ mod tests {
         assert_eq!(saved_margins["right"], 4);
 
         let _ = std::fs::remove_file(&cfg_snapshot.sdr_ui_override_file);
+    }
+
+    #[test]
+    fn overlay_target_selects_main_or_display_file() {
+        let mut cfg = AppConfig::default();
+        cfg.overlay_text_path = PathBuf::from("/dev/shm/overlay.json");
+        let target = |display: Option<&str>| {
+            overlay_target(
+                &cfg,
+                &OverlayQuery {
+                    display: display.map(str::to_string),
+                },
+            )
+            .ok()
+        };
+        let main = Some(("main".to_string(), PathBuf::from("/dev/shm/overlay.json")));
+        assert_eq!(target(None), main);
+        assert_eq!(target(Some("main")), main);
+        assert_eq!(target(Some("")), main);
+        assert_eq!(
+            target(Some("cluster-1")),
+            Some((
+                "cluster-1".to_string(),
+                PathBuf::from("/dev/shm/overlay_cluster-1.json")
+            ))
+        );
+        assert!(target(Some("../config")).is_none());
     }
 }

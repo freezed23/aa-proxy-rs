@@ -26,6 +26,7 @@ use crate::mitm_prettyprint::{
     pkt_debug, pkt_debug_with_full_frame, update_debug_channel_kinds, PacketDebugServiceKind,
     PktDebugFullFrameBuffers,
 };
+use crate::sdr_snapshot;
 use crate::sdr_ui;
 use crate::ssl::{AaConnection, SslMemBuf, TlsBackend};
 use crate::vendor_ext::{
@@ -191,6 +192,10 @@ pub struct ModifyContext {
     pub(crate) injected_service_ids: HashSet<i32>,
     /// Channels corresponding to injected services that must never be forwarded to HU.
     pub(crate) injected_channels: HashSet<u8>,
+    /// Channel of the synthetic navigation_status_service (inject_navigation_status).
+    pub(crate) injected_nav_channel: Option<u8>,
+    /// Message ids already seen on the synthetic navigation channel (logged once each).
+    pub(crate) injected_nav_seen: HashSet<u16>,
     /// Synthetic Bluetooth passthrough service/channel, if advertised by aa-proxy-rs.
     pub(crate) injected_bluetooth_channel: Option<u8>,
     /// Whether the synthetic real-HU Bluetooth passthrough channel has been
@@ -204,6 +209,15 @@ pub struct ModifyContext {
     pub(crate) injected_media_state: HashMap<u8, InjectedMediaState>,
     /// Last observed tap client connection generation by media channel.
     pub(crate) injected_media_connect_gen: HashMap<u8, u64>,
+    /// Real (HU-advertised, not injected) video channels -> display type.
+    pub(crate) real_video_channels: HashMap<u8, DisplayType>,
+    /// Last seen tap client connect generation per real video channel.
+    pub(crate) real_video_connect_gen: HashMap<u8, u64>,
+    /// Last video focus the real HU reported (HU -> phone VIDEO_FOCUS_NOTIFICATION)
+    /// per real video channel.
+    pub(crate) real_video_hu_focus: HashMap<u8, VideoFocusMode>,
+    /// When the keyframe-request focus toggle last ran per real video channel.
+    pub(crate) real_video_last_toggle: HashMap<u8, std::time::Instant>,
     /// Last observed tap-consumer presence by media channel.
     pub(crate) injected_media_had_tap_client: HashMap<u8, bool>,
     /// Internal broadcast receivers kept alive while map_album_art_source=rust_h264.
@@ -489,6 +503,10 @@ async fn populate_media_tap_channels_by_order(
     //   +15 video-aux-1, +16 video-aux-2, ...
     // Missing sinks simply have no registered channel/output; their listeners stay open.
     ctx.media_channels.clear();
+    ctx.real_video_channels.clear();
+    ctx.real_video_connect_gen.clear();
+    ctx.real_video_hu_focus.clear();
+    ctx.real_video_last_toggle.clear();
     {
         let mut shared_media_channels = ctx.shared_media_channels.lock().await;
         shared_media_channels.clear();
@@ -561,6 +579,10 @@ async fn populate_media_tap_channels_by_order(
             )
             .await;
             register_media_channel_sink(ctx, ch, sink).await;
+            if !ctx.injected_media_display.contains_key(&ch) {
+                ctx.real_video_channels
+                    .insert(ch, svc.media_sink_service.display_type());
+            }
             debug!(
                 "{} media_channels.insert: ch={:#04x} offset={} media_order=static_slot",
                 get_name(proxy_type),
@@ -1257,27 +1279,21 @@ fn choose_bt_sco_media_bridge_sink(
         let audio_type_score = match preferred_audio_type {
             // Call-audio mode: try GUIDANCE first because several HUs mute MEDIA
             // while a phone call/microphone session is active.
-            // Call-audio mode: try GUIDANCE first because several HUs mute MEDIA
-            // while a phone call/microphone session is active.
             BtScoMediaBridgeAudioType::Guidance => match audio_type {
                 AUDIO_STREAM_GUIDANCE => 0,
                 AUDIO_STREAM_MEDIA => 40,
                 AUDIO_STREAM_SYSTEM_AUDIO => 80,
                 _ => 120,
             },
-            BtScoMediaBridgeAudioType::Media => match audio_type {
-                AUDIO_STREAM_MEDIA => 0,
-                AUDIO_STREAM_GUIDANCE => 40,
-                AUDIO_STREAM_SYSTEM_AUDIO => 80,
-                _ => 120,
-            },
-            // Legacy behaviour: prefer normal media first.
-            BtScoMediaBridgeAudioType::Auto => match audio_type {
-                AUDIO_STREAM_MEDIA => 0,
-                AUDIO_STREAM_GUIDANCE => 40,
-                AUDIO_STREAM_SYSTEM_AUDIO => 80,
-                _ => 120,
-            },
+            // Auto is the legacy behaviour: prefer normal media first.
+            BtScoMediaBridgeAudioType::Media | BtScoMediaBridgeAudioType::Auto => {
+                match audio_type {
+                    AUDIO_STREAM_MEDIA => 0,
+                    AUDIO_STREAM_GUIDANCE => 40,
+                    AUDIO_STREAM_SYSTEM_AUDIO => 80,
+                    _ => 120,
+                }
+            }
         };
 
         for acfg in sink.audio_configs.iter() {
@@ -1320,7 +1336,17 @@ async fn update_last_service_discovery_response(
     match protobuf_json_mapping::print_to_string(msg) {
         Ok(json_string) => match serde_json::from_str::<serde_json::Value>(&json_string) {
             Ok(json_value) => {
-                *last_service_discovery_response.write().await = Some(json_value);
+                *last_service_discovery_response.write().await = Some(json_value.clone());
+                // Persist the most recently observed SDR for the web SDR Info page.
+                // Failure is non-fatal: keep the live AA session and in-memory SDR.
+                if let Err(e) = sdr_snapshot::save(&json_value).await {
+                    warn!(
+                        "{} could not persist last SDR to {}: {}",
+                        get_name(proxy_type),
+                        sdr_snapshot::LAST_SDR_PATH,
+                        e
+                    );
+                }
             }
             Err(e) => {
                 warn!(
@@ -2156,6 +2182,15 @@ pub async fn pkt_modify_hook(
         return Ok(PacketAction::Forward);
     }
 
+    // Remember the real HU's own video focus (HU -> phone) so the media tap keyframe
+    // request never fights it.
+    if proxy_type == ProxyType::HeadUnit
+        && flow == PacketFlow::FromEndpoint
+        && (pkt.flags & _CONTROL) == 0
+    {
+        crate::display::observe_real_video_focus(pkt, ctx);
+    }
+
     if let Some(handled) =
         run_wasm_hooks(proxy_type, pkt, ctx, cfg, script_registry.as_deref()).await?
     {
@@ -2662,6 +2697,19 @@ pub async fn pkt_modify_hook(
         if let Ok(msg) = AudioConfig::parse_from_bytes(data) {
             bt_sco_media_bridge::notify_media_config(pkt.channel, &msg);
         }
+    }
+
+    // The HU acknowledges the DATA injected by the SCO media bridge with the bridge's own
+    // session id. The phone never sent that data, so keep those ACKs away from it.
+    if cfg.bt_sco
+        && cfg.bt_sco_media_bridge
+        && proxy_type == ProxyType::MobileDevice
+        && flow == PacketFlow::ToEndpoint
+        && pkt.channel != 0
+        && message_id == MEDIA_MESSAGE_ACK as i32
+        && bt_sco_media_bridge::consume_bridge_ack(pkt.channel, data)
+    {
+        return Ok(PacketAction::Drop);
     }
 
     if cfg.bt_sco
@@ -3350,6 +3398,36 @@ pub async fn pkt_modify_hook(
                 );
             }
 
+            // Synthetic navigation_status_service for HUs that do not advertise one (e.g. the
+            // GAC Aion head unit): without it the phone never sends VehicleEnergyForecast.
+            if cfg.inject_navigation_status
+                && !msg
+                    .services
+                    .iter()
+                    .any(|svc| svc.navigation_status_service.is_some())
+            {
+                let service_id = msg.services.iter().map(|svc| svc.id()).max().unwrap_or(0) + 1;
+                let mut nav = NavigationStatusService::new();
+                nav.set_minimum_interval_ms(500);
+                nav.set_type(navigation_status_service::InstrumentClusterType::ENUM);
+                let mut service = Service::new();
+                service.set_id(service_id);
+                service.navigation_status_service = Some(nav).into();
+                msg.services.push(service);
+
+                ctx.injected_service_ids.insert(service_id);
+                ctx.injected_channels.insert(service_id as u8);
+                ctx.injected_nav_channel = Some(service_id as u8);
+                ctx.nav_channel = Some(service_id as u8);
+
+                info!(
+                    "{} <yellow>{:?}</>: injected <blue>navigation_status_service</> id=<b>{:#04x}</> (HU has none)",
+                    get_name(proxy_type),
+                    control.unwrap(),
+                    service_id as u8
+                );
+            }
+
             // Save navigation channel in context when any feature needs to inspect it.
             // Protocol-version-induced VehicleEnergyForecast dropping is always armed
             // when protocol override is enabled, but it only actually drops if the
@@ -3656,6 +3734,7 @@ pub async fn pkt_modify_hook(
                 cfg.overlay_hw_accel,
                 &cfg.overlay_v4l2_decoder,
                 &cfg.overlay_v4l2_encoder,
+                &ctx.injected_media_profile_ids,
             );
 
             // Populate media tap channels from the final rewritten SDR. Ports are opened
@@ -4497,12 +4576,18 @@ pub async fn proxy<D: IoDeviceTrait>(
         hu_service_ids: HashSet::new(),
         injected_service_ids: HashSet::new(),
         injected_channels: HashSet::new(),
+        injected_nav_channel: None,
+        injected_nav_seen: HashSet::new(),
         injected_bluetooth_channel: None,
         bt_real_hu_passthrough_channel_open: false,
         injected_media_display: HashMap::new(),
         injected_media_profile_ids: HashMap::new(),
         injected_media_state: HashMap::new(),
         injected_media_connect_gen: HashMap::new(),
+        real_video_channels: HashMap::new(),
+        real_video_connect_gen: HashMap::new(),
+        real_video_hu_focus: HashMap::new(),
+        real_video_last_toggle: HashMap::new(),
         injected_media_had_tap_client: HashMap::new(),
         map_album_art_h264_virtual_taps: HashMap::new(),
         vendor_service_ids: HashSet::new(),
@@ -4596,7 +4681,28 @@ pub async fn proxy<D: IoDeviceTrait>(
                         service_id
                     );
 
+                    let channel = pkt.channel;
                     tx.send(pkt).await?;
+
+                    // A real cluster HU sends INSTRUMENT_CLUSTER_START after opening the channel;
+                    // nav apps (CarNavigationStatusManager onStart) only send status after it.
+                    if ctx.injected_nav_channel == Some(channel) {
+                        let id = NavigationStatusMessageId::INSTRUMENT_CLUSTER_START as u16;
+                        let mut payload = vec![(id >> 8) as u8, (id & 0xff) as u8];
+                        payload.extend(NavigationStatusStart::new().write_to_bytes()?);
+                        tx.send(Packet {
+                            channel,
+                            flags: ENCRYPTED | FRAME_TYPE_FIRST | FRAME_TYPE_LAST,
+                            final_length: None,
+                            payload,
+                        })
+                        .await?;
+                        info!(
+                            "{} <yellow>transparency:</> sent INSTRUMENT_CLUSTER_START on injected navigation channel <b>{:#04x}</>",
+                            get_name(proxy_type),
+                            channel
+                        );
+                    }
                     continue;
                 }
 
@@ -4624,6 +4730,52 @@ pub async fn proxy<D: IoDeviceTrait>(
 
                         continue;
                     }
+                }
+
+                // Synthetic navigation channel: let pkt_modify_hook see whole messages
+                // (VehicleEnergyForecast -> websocket, WASM navigation hooks), then drop.
+                if ctx.injected_nav_channel == Some(pkt.channel) {
+                    let first_id = (pkt.flags & FRAME_TYPE_FIRST != 0)
+                        .then(|| pkt.payload.get(0..2))
+                        .flatten()
+                        .map(|b| u16::from_be_bytes([b[0], b[1]]));
+                    if let Some(id) = first_id {
+                        if ctx.injected_nav_seen.insert(id) {
+                            info!(
+                                "{} injected navigation channel: first {} (0x{:04X}), {} bytes",
+                                get_name(proxy_type),
+                                ssl_trace_navigation_msg_name(id),
+                                id,
+                                pkt.payload.len()
+                            );
+                        }
+                    }
+                    if pkt.flags & FRAME_TYPE_MASK == FRAME_TYPE_MASK {
+                        let _ = pkt_modify_hook(
+                            proxy_type,
+                            PacketFlow::ToEndpoint,
+                            &mut pkt,
+                            &mut ctx,
+                            false,
+                            sensor_channel.clone(),
+                            input_channel.clone(),
+                            last_battery.clone(),
+                            last_speed.clone(),
+                            last_service_discovery_response.clone(),
+                            &cfg,
+                            &mut config,
+                            script_registry.clone(),
+                            ws_event_tx.clone()
+                        )
+                        .await?;
+                    } else {
+                        debug!(
+                            "{} injected navigation channel: skipping fragmented frame flags={:#04x}",
+                            get_name(proxy_type),
+                            pkt.flags
+                        );
+                    }
+                    continue;
                 }
 
                 let msg_id = raw_msg_id
@@ -4935,12 +5087,18 @@ mod tests {
             hu_service_ids: HashSet::new(),
             injected_service_ids: HashSet::new(),
             injected_channels: HashSet::new(),
+            injected_nav_channel: None,
+            injected_nav_seen: HashSet::new(),
             injected_bluetooth_channel: None,
             bt_real_hu_passthrough_channel_open: false,
             injected_media_display: HashMap::new(),
             injected_media_profile_ids: HashMap::new(),
             injected_media_state: HashMap::new(),
             injected_media_connect_gen: HashMap::new(),
+            real_video_channels: HashMap::new(),
+            real_video_connect_gen: HashMap::new(),
+            real_video_hu_focus: HashMap::new(),
+            real_video_last_toggle: HashMap::new(),
             injected_media_had_tap_client: HashMap::new(),
             map_album_art_h264_virtual_taps: HashMap::new(),
             vendor_service_ids: HashSet::new(),
