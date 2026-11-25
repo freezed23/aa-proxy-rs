@@ -2,8 +2,10 @@
 //!
 //! Reads JSON (or plain text) from the path configured by `overlay_text_path` in `config.toml`
 //! (default `/dev/shm/overlay.json`), splits carriage returns (`\r\n`, `\n`, `\r`) into
-//! multiple lines, and renders a translucent box with text near the bottom-right corner of
-//! decoded YUV420 (`I420`) video frames before re-encoding to H.264 Baseline Annex-B via `rusty_h264`.
+//! multiple lines, and renders a translucent box with text on decoded YUV420 (`I420`) video
+//! frames before re-encoding to H.264 Baseline Annex-B via `rusty_h264`. The box is placed with
+//! `anchor_horizontal` / `anchor_vertical` (9 positions, default bottom-right) plus
+//! `offset_x_px` / `offset_y_px`.
 
 use crate::config::DEFAULT_OVERLAY_TEXT_PATH;
 use crate::mitm::protos::{
@@ -36,10 +38,20 @@ pub const POLL_INTERVAL_MS: u64 = 250;
 /// Opacity percentage of the overlay box background (`0` = fully transparent, `100` = fully opaque).
 pub const BOX_OPACITY_PERCENT: u8 = 0;
 
+/// Horizontal anchor of the box (`Left`, `Center` or `Right`); `offset_x_px` is measured from the
+/// anchored edge (ignored for `Center`).
+pub const ANCHOR_HORIZONTAL: HorizontalAnchor = HorizontalAnchor::Right;
+
+/// Vertical anchor of the box (`Top`, `Center` or `Bottom`); `offset_y_px` is measured from the
+/// anchored edge (ignored for `Center`).
+pub const ANCHOR_VERTICAL: VerticalAnchor = VerticalAnchor::Bottom;
+
 /// Distance in pixels from the right edge of the video frame to the right edge of the box.
+/// Legacy: used as the horizontal offset when `offset_x_px` is not set.
 pub const BOX_MARGIN_RIGHT_PX: usize = 100;
 
 /// Distance in pixels from the bottom edge of the video frame to the bottom edge of the box.
+/// Legacy: used as the vertical offset when `offset_y_px` is not set.
 pub const BOX_MARGIN_BOTTOM_PX: usize = 9;
 
 /// Horizontal internal padding (in pixels) between the box border and the text.
@@ -134,6 +146,73 @@ where
     }
 }
 
+/// Horizontal anchor of the overlay box. Accepts (case-insensitive) `"left"`, `"center"` and
+/// `"right"`; `null` or an unknown value falls back to the default (`"right"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HorizontalAnchor {
+    Left,
+    Center,
+    Right,
+}
+
+/// Vertical anchor of the overlay box. Accepts (case-insensitive) `"top"`, `"center"`
+/// (or `"middle"`) and `"bottom"`; `null` or an unknown value falls back to the default
+/// (`"bottom"`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VerticalAnchor {
+    Top,
+    Center,
+    Bottom,
+}
+
+impl<'de> Deserialize<'de> for HorizontalAnchor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => ANCHOR_HORIZONTAL,
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "left" => Self::Left,
+                "center" => Self::Center,
+                "right" => Self::Right,
+                other => {
+                    warn!(
+                        "overlay: unknown anchor_horizontal {:?}, using default",
+                        other
+                    );
+                    ANCHOR_HORIZONTAL
+                }
+            },
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for VerticalAnchor {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<String>::deserialize(deserializer)? {
+            None => ANCHOR_VERTICAL,
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "top" => Self::Top,
+                "center" | "middle" => Self::Center,
+                "bottom" => Self::Bottom,
+                other => {
+                    warn!(
+                        "overlay: unknown anchor_vertical {:?}, using default",
+                        other
+                    );
+                    ANCHOR_VERTICAL
+                }
+            },
+        })
+    }
+}
+
 /// Live JSON configuration and text loaded from [`OVERLAY_TEXT_PATH`] (`/dev/shm/overlay.json`).
 ///
 /// Any omitted field automatically defaults to the corresponding constant from
@@ -146,8 +225,22 @@ pub struct OverlayConfig {
     pub poll_interval_ms: u64,
     #[serde(alias = "BOX_OPACITY_PERCENT")]
     pub box_opacity_percent: u8,
+    #[serde(alias = "ANCHOR_HORIZONTAL")]
+    pub anchor_horizontal: HorizontalAnchor,
+    #[serde(alias = "ANCHOR_VERTICAL")]
+    pub anchor_vertical: VerticalAnchor,
+    /// Distance from the anchored vertical edge (left/right); falls back to
+    /// `box_margin_right_px` when not set. Ignored for `Center`.
+    #[serde(default, alias = "OFFSET_X_PX")]
+    pub offset_x_px: Option<usize>,
+    /// Distance from the anchored horizontal edge (top/bottom); falls back to
+    /// `box_margin_bottom_px` when not set. Ignored for `Center`.
+    #[serde(default, alias = "OFFSET_Y_PX")]
+    pub offset_y_px: Option<usize>,
+    /// Legacy name of the horizontal offset, kept for backward compatibility.
     #[serde(alias = "BOX_MARGIN_RIGHT_PX")]
     pub box_margin_right_px: usize,
+    /// Legacy name of the vertical offset, kept for backward compatibility.
     #[serde(alias = "BOX_MARGIN_BOTTOM_PX")]
     pub box_margin_bottom_px: usize,
     #[serde(alias = "BOX_PADDING_X_PX")]
@@ -207,6 +300,10 @@ impl Default for OverlayConfig {
         Self {
             poll_interval_ms: POLL_INTERVAL_MS,
             box_opacity_percent: BOX_OPACITY_PERCENT,
+            anchor_horizontal: ANCHOR_HORIZONTAL,
+            anchor_vertical: ANCHOR_VERTICAL,
+            offset_x_px: None,
+            offset_y_px: None,
             box_margin_right_px: BOX_MARGIN_RIGHT_PX,
             box_margin_bottom_px: BOX_MARGIN_BOTTOM_PX,
             box_padding_x_px: BOX_PADDING_X_PX,
@@ -231,6 +328,45 @@ impl Default for OverlayConfig {
     }
 }
 
+impl OverlayConfig {
+    /// Effective horizontal offset: `offset_x_px`, or the legacy `box_margin_right_px`.
+    pub fn effective_offset_x_px(&self) -> usize {
+        self.offset_x_px.unwrap_or(self.box_margin_right_px)
+    }
+
+    /// Effective vertical offset: `offset_y_px`, or the legacy `box_margin_bottom_px`.
+    pub fn effective_offset_y_px(&self) -> usize {
+        self.offset_y_px.unwrap_or(self.box_margin_bottom_px)
+    }
+
+    /// Top-left corner of a `box_w` x `box_h` box inside a `frame_w` x `frame_h` frame according
+    /// to the configured anchors and offsets. The result is clamped so the box never leaves
+    /// the frame.
+    pub fn box_origin(
+        &self,
+        frame_w: usize,
+        frame_h: usize,
+        box_w: usize,
+        box_h: usize,
+    ) -> (usize, usize) {
+        let max_x = frame_w.saturating_sub(box_w);
+        let max_y = frame_h.saturating_sub(box_h);
+        let off_x = self.effective_offset_x_px();
+        let off_y = self.effective_offset_y_px();
+        let x = match self.anchor_horizontal {
+            HorizontalAnchor::Left => off_x,
+            HorizontalAnchor::Center => max_x / 2,
+            HorizontalAnchor::Right => max_x.saturating_sub(off_x),
+        };
+        let y = match self.anchor_vertical {
+            VerticalAnchor::Top => off_y,
+            VerticalAnchor::Center => max_y / 2,
+            VerticalAnchor::Bottom => max_y.saturating_sub(off_y),
+        };
+        (x.min(max_x), y.min(max_y))
+    }
+}
+
 // ============================================================================
 // INTERNAL STATE & LIVE TEXT CACHE
 // ============================================================================
@@ -242,14 +378,80 @@ struct CachedOverlayText {
     lines: Vec<String>,
 }
 
+impl CachedOverlayText {
+    fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            last_check: None,
+            config: OverlayConfig::default(),
+            lines: Vec::new(),
+        }
+    }
+}
+
+/// Overlay file of the main display (`overlay_text_path`). Also used by the other displays
+/// without an own file when `only_main_display = false`.
 static OVERLAY_TEXT_CACHE: LazyLock<Mutex<CachedOverlayText>> = LazyLock::new(|| {
-    Mutex::new(CachedOverlayText {
-        path: PathBuf::from(DEFAULT_OVERLAY_TEXT_PATH),
-        last_check: None,
-        config: OverlayConfig::default(),
-        lines: Vec::new(),
-    })
+    Mutex::new(CachedOverlayText::new(PathBuf::from(
+        DEFAULT_OVERLAY_TEXT_PATH,
+    )))
 });
+
+/// Overlay state of a non-main display that has its own `overlay_<id>.json` file (see
+/// [`display_overlay_path`]): its own text/style and its own TTF font cache.
+struct DisplayOverlaySource {
+    text: Mutex<CachedOverlayText>,
+    font: Mutex<CachedOverlayFont>,
+}
+
+/// Video channels using their own overlay file, set up in [`register_video_channels_from_sdr`].
+/// Registered channels missing here use the main overlay.
+static DISPLAY_SOURCES: LazyLock<Mutex<HashMap<u8, Arc<DisplayOverlaySource>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn display_source(channel: u8) -> Option<Arc<DisplayOverlaySource>> {
+    DISPLAY_SOURCES.lock().ok()?.get(&channel).cloned()
+}
+
+/// Returns `true` for an id usable in an `overlay_<id>.json` file name: 1-64 characters out of
+/// lowercase ASCII letters, digits, `-` and `_`.
+pub fn valid_display_overlay_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+}
+
+/// Overlay file of the display `id`: `overlay_<id>.json` in the directory of the main overlay
+/// file (`main_path` = `overlay_text_path`), e.g. `/dev/shm/overlay_cluster-1.json`.
+/// `None` for an invalid id (see [`valid_display_overlay_id`]).
+pub fn display_overlay_path(main_path: &Path, id: &str) -> Option<PathBuf> {
+    if !valid_display_overlay_id(id) {
+        return None;
+    }
+    Some(resolve_overlay_text_path(main_path).with_file_name(format!("overlay_{id}.json")))
+}
+
+/// Overlay id of a non-main video sink: the Display Injection profile id for injected displays
+/// (e.g. `cluster-1`, `auxiliary-1`), `hu-cluster-<display_id>` / `hu-auxiliary-<display_id>`
+/// for the head unit's own displays. `None` for the main display.
+fn display_overlay_id(
+    channel: u8,
+    display_type: DisplayType,
+    display_id: u32,
+    injected_display_ids: &HashMap<u8, String>,
+) -> Option<String> {
+    let prefix = match display_type {
+        DisplayType::DISPLAY_TYPE_MAIN => return None,
+        DisplayType::DISPLAY_TYPE_CLUSTER => "cluster",
+        DisplayType::DISPLAY_TYPE_AUXILIARY => "auxiliary",
+    };
+    match injected_display_ids.get(&channel) {
+        Some(id) => Some(id.clone()),
+        None => Some(format!("hu-{prefix}-{display_id}")),
+    }
+}
 
 /// Set at ServiceDiscoveryResponse time from `overlay_enabled`. While `false` every hook in
 /// this module returns immediately (single relaxed atomic load: no locks, no file access), so the
@@ -317,6 +519,33 @@ struct CachedOverlayFont {
 }
 
 impl CachedOverlayFont {
+    fn new(config_path: PathBuf) -> Self {
+        let mut cache = Self {
+            config_path: PathBuf::new(),
+            json_path: PathBuf::new(),
+            path: PathBuf::new(),
+            last_check: None,
+            attempted_mtime: None,
+            font: None,
+        };
+        cache.set_config_path(config_path);
+        cache
+    }
+
+    fn set_config_path(&mut self, path: PathBuf) {
+        if self.config_path != path {
+            self.config_path = path;
+            self.refresh_effective_path();
+        }
+    }
+
+    fn set_json_path(&mut self, path: PathBuf) {
+        if self.json_path != path {
+            self.json_path = path;
+            self.refresh_effective_path();
+        }
+    }
+
     fn refresh_effective_path(&mut self) {
         let effective = if self.json_path.as_os_str().is_empty() {
             self.config_path.clone()
@@ -332,16 +561,8 @@ impl CachedOverlayFont {
     }
 }
 
-static OVERLAY_FONT_CACHE: LazyLock<Mutex<CachedOverlayFont>> = LazyLock::new(|| {
-    Mutex::new(CachedOverlayFont {
-        config_path: PathBuf::new(),
-        json_path: PathBuf::new(),
-        path: PathBuf::new(),
-        last_check: None,
-        attempted_mtime: None,
-        font: None,
-    })
-});
+static OVERLAY_FONT_CACHE: LazyLock<Mutex<CachedOverlayFont>> =
+    LazyLock::new(|| Mutex::new(CachedOverlayFont::new(PathBuf::new())));
 
 /// Number of font file read+parse attempts (used by tests to verify they are not repeated).
 #[cfg(test)]
@@ -352,27 +573,41 @@ fn trimmed_path(path: &Path) -> PathBuf {
     PathBuf::from(s.trim())
 }
 
-/// Sets the TTF font path from `overlay_font_path` in `config.toml`. Empty or whitespace-only means
-/// "no TTF font" (built-in bitmap font). A non-empty `"font_path"` in the live JSON file
-/// ([`set_overlay_json_font_path`]) takes precedence over this value.
+/// Sets the TTF font path from `overlay_font_path` in `config.toml` (for the main overlay and the
+/// displays with an own overlay file). Empty or whitespace-only means "no TTF font" (built-in
+/// bitmap font). A non-empty `"font_path"` in the live JSON file ([`set_overlay_json_font_path`])
+/// takes precedence over this value.
 pub fn set_overlay_font_path(path: &Path) {
     let resolved = trimmed_path(path);
     if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
-        if cache.config_path != resolved {
-            cache.config_path = resolved;
-            cache.refresh_effective_path();
+        cache.set_config_path(resolved.clone());
+    }
+    if let Ok(sources) = DISPLAY_SOURCES.lock() {
+        for source in sources.values() {
+            if let Ok(mut cache) = source.font.lock() {
+                cache.set_config_path(resolved.clone());
+            }
         }
     }
 }
 
-/// Sets the TTF font path from `"font_path"` in the live JSON file (empty = not set).
+/// Sets the TTF font path from `"font_path"` in the live main JSON file (empty = not set).
 pub fn set_overlay_json_font_path(path: &str) {
-    let resolved = trimmed_path(Path::new(path));
     if let Ok(mut cache) = OVERLAY_FONT_CACHE.lock() {
-        if cache.json_path != resolved {
-            cache.json_path = resolved;
-            cache.refresh_effective_path();
-        }
+        cache.set_json_path(trimmed_path(Path::new(path)));
+    }
+}
+
+/// Retrieves the active TTF font of the main overlay, see [`load_overlay_font`].
+pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
+    load_overlay_font(&OVERLAY_FONT_CACHE)
+}
+
+/// TTF font of the overlay drawn on `channel` (its own overlay file, or the main overlay).
+fn overlay_font_for_channel(channel: u8) -> Option<Arc<fontdue::Font>> {
+    match display_source(channel) {
+        Some(source) => load_overlay_font(&source.font),
+        None => get_cached_overlay_font(),
     }
 }
 
@@ -383,12 +618,12 @@ pub fn set_overlay_json_font_path(path: &str) {
 /// The font file is re-checked at most every [`FONT_CHECK_INTERVAL`] and (re)loaded only when its
 /// modification time changes. Reading and parsing a font takes tens of milliseconds, so it is done
 /// without holding the cache lock, which is also taken by the packet-handling thread.
-pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
+fn load_overlay_font(font_cache: &Mutex<CachedOverlayFont>) -> Option<Arc<fontdue::Font>> {
     let now = Instant::now();
 
     // Phase 1 (locked): decide whether the file has to be (re)loaded.
     let (path, mtime) = {
-        let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
+        let mut cache = font_cache.lock().ok()?;
         if cache.path.as_os_str().is_empty() {
             cache.font = None;
             return None;
@@ -451,7 +686,7 @@ pub fn get_cached_overlay_font() -> Option<Arc<fontdue::Font>> {
     };
 
     // Phase 3 (locked): publish the result unless the path changed in the meantime.
-    let mut cache = OVERLAY_FONT_CACHE.lock().ok()?;
+    let mut cache = font_cache.lock().ok()?;
     if cache.path == path {
         cache.attempted_mtime = Some(mtime);
         cache.font = loaded;
@@ -470,31 +705,35 @@ struct ChannelGateState {
 static SESSION_HW_ACCEL: Mutex<crate::config::OverlayHwAccel> =
     Mutex::new(crate::config::OverlayHwAccel::None);
 static SESSION_V4L2_DEVICES: Mutex<Option<crate::v4l2_m2m::V4l2CodecDevices>> = Mutex::new(None);
+/// Set for the session when the Sophgo CVI hardware codec was requested and found.
+static SESSION_CVI_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub enum DecoderBackend {
     Software(Decoder),
     V4l2(crate::v4l2_m2m::V4l2M2mDecoder),
+    Cvi(crate::cvi_codec::CviDecoder),
 }
 
 pub enum EncoderBackend {
     Software(Encoder),
     V4l2(crate::v4l2_m2m::V4l2M2mEncoder),
+    Cvi(crate::cvi_codec::CviEncoder),
 }
 
-/// Returns true if the channel currently decodes with the V4L2 hardware decoder.
-fn channel_uses_v4l2_decoder(channel: u8) -> bool {
+/// Returns true if the channel currently decodes with a hardware decoder (V4L2 M2M or CVI).
+fn channel_uses_hw_decoder(channel: u8) -> bool {
     VIDEO_DECODERS
         .lock()
         .map(|map| {
             map.get(&channel)
-                .map(|st| matches!(st.backend, DecoderBackend::V4l2(_)))
+                .map(|st| matches!(st.backend, DecoderBackend::V4l2(_) | DecoderBackend::Cvi(_)))
                 .unwrap_or(false)
         })
         .unwrap_or(false)
 }
 
-/// Number of consecutive V4L2 encoder timeouts tolerated before falling back to software.
-const V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
+/// Number of consecutive hardware encoder timeouts tolerated before falling back to software.
+const HW_ENC_MAX_CONSECUTIVE_TIMEOUTS: u32 = 10;
 
 /// Per-channel H.264 decoder state owned by the Stage-1 decoder worker (`ovl-h264-dec`, Core 2).
 struct ChannelDecoderState {
@@ -504,7 +743,9 @@ struct ChannelDecoderState {
 
 impl ChannelDecoderState {
     fn new(channel: u8) -> Self {
-        let backend = if let Ok(guard) = SESSION_V4L2_DEVICES.lock() {
+        let mut backend: Option<DecoderBackend> = None;
+
+        if let Ok(guard) = SESSION_V4L2_DEVICES.lock() {
             if let Some(devs) = guard.as_ref() {
                 match crate::v4l2_m2m::V4l2M2mDecoder::new(&devs.decoder_path) {
                     Ok(dec) => {
@@ -513,7 +754,7 @@ impl ChannelDecoderState {
                             channel,
                             devs.decoder_path.display()
                         );
-                        DecoderBackend::V4l2(dec)
+                        backend = Some(DecoderBackend::V4l2(dec));
                     }
                     Err(e) => {
                         warn!(
@@ -522,18 +763,31 @@ impl ChannelDecoderState {
                             devs.decoder_path.display(),
                             e
                         );
-                        DecoderBackend::Software(Decoder::new())
                     }
                 }
-            } else {
-                DecoderBackend::Software(Decoder::new())
             }
-        } else {
-            DecoderBackend::Software(Decoder::new())
-        };
+        }
+
+        if backend.is_none() && SESSION_CVI_ENABLED.load(Ordering::Acquire) {
+            match crate::cvi_codec::CviDecoder::new() {
+                Ok(dec) => {
+                    info!(
+                        "overlay: ch {:#04x} initialized Sophgo CVI hardware decoder",
+                        channel
+                    );
+                    backend = Some(DecoderBackend::Cvi(dec));
+                }
+                Err(e) => {
+                    warn!(
+                        "overlay: ch {:#04x} failed to initialize CVI decoder: {}, using pure-Rust software decoder",
+                        channel, e
+                    );
+                }
+            }
+        }
 
         Self {
-            backend,
+            backend: backend.unwrap_or_else(|| DecoderBackend::Software(Decoder::new())),
             phone_codec_config: None,
         }
     }
@@ -608,6 +862,10 @@ impl ChannelEncoderState {
             || self.encoder_dims != Some(dims)
             || self.encoder_qp_gop != Some(qp_gop)
         {
+            // Release the previous encoder first: hardware codecs have a limited number of
+            // channels (e.g. one on the Sophgo CVI with the default `MaxVencChnNum=1`), so the
+            // new one must not be created while the old one still holds its channel.
+            self.encoder = None;
             let mut enc_backend = None;
             if let Ok(devices) = SESSION_V4L2_DEVICES.lock() {
                 if let Some(devs) = devices.as_ref() {
@@ -631,6 +889,24 @@ impl ChannelEncoderState {
                                 channel, devs.encoder_path.display(), e
                             );
                         }
+                    }
+                }
+            }
+
+            if enc_backend.is_none() && SESSION_CVI_ENABLED.load(Ordering::Acquire) {
+                match crate::cvi_codec::CviEncoder::new(width, height, qp_gop.0, qp_gop.1) {
+                    Ok(cvi_enc) => {
+                        info!(
+                            "overlay: ch {:#04x} ({:?}) initialized Sophgo CVI hardware encoder ({}x{}, GOP={})",
+                            channel, self.display_type, width, height, qp_gop.1
+                        );
+                        enc_backend = Some(EncoderBackend::Cvi(cvi_enc));
+                    }
+                    Err(e) => {
+                        warn!(
+                            "overlay: ch {:#04x} failed to initialize CVI encoder: {}, falling back to pure-Rust software encoder",
+                            channel, e
+                        );
                     }
                 }
             }
@@ -674,8 +950,12 @@ impl ChannelEncoderState {
     pub fn get_sps_pps(&self, qp: u8) -> Option<Vec<u8>> {
         let (w, h) = self.encoder_dims?;
         match &self.encoder {
-            Some(EncoderBackend::V4l2(v4l2_enc)) => {
-                let hdr = v4l2_enc.header_bytes();
+            Some(EncoderBackend::V4l2(_)) | Some(EncoderBackend::Cvi(_)) => {
+                let hdr = match &self.encoder {
+                    Some(EncoderBackend::V4l2(v4l2_enc)) => v4l2_enc.header_bytes(),
+                    Some(EncoderBackend::Cvi(cvi_enc)) => cvi_enc.header_bytes(),
+                    _ => &[],
+                };
                 if !hdr.is_empty() {
                     Some(hdr.to_vec())
                 } else {
@@ -925,7 +1205,7 @@ fn stage1_decoder_worker_loop(
         let h264_au = &job.frame_data[10..];
         let in_len = h264_au.len();
 
-        let hw_decoder = channel_uses_v4l2_decoder(job.channel);
+        let hw_decoder = channel_uses_hw_decoder(job.channel);
         match decode_video_access_unit(job.channel, h264_au) {
             Some((yuv, dec_dur, incoming_has_idr)) => {
                 stage2.push(Stage2Job::DecodedData {
@@ -941,7 +1221,7 @@ fn stage1_decoder_worker_loop(
                 });
             }
             None if hw_decoder => {
-                // The V4L2 decoder is pipelined: no frame ready yet. Forwarding the phone's
+                // The hardware decoder is pipelined: no frame ready yet. Forwarding the phone's
                 // original access unit would mix two different H.264 streams, so drop it.
                 PIPELINE_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
             }
@@ -1027,7 +1307,7 @@ fn stage2_encoder_worker_loop(stage2: &'static WorkerQueue<Stage2Job>) {
                 fallback_frame_data,
                 out_tx,
             } => {
-                let (cfg, lines) = get_cached_overlay_config_and_lines();
+                let (cfg, lines) = get_cached_overlay_config_and_lines_for_channel(channel);
                 let (out_msgs, _) = encode_decoded_video_frame(
                     channel,
                     &timestamp_bytes,
@@ -1083,6 +1363,16 @@ pub fn overlay_enabled() -> bool {
 /// session using the configured `overlay_text_path` (or [`DEFAULT_OVERLAY_TEXT_PATH`] if empty) and
 /// default [`OverlayConfig`] values if the file is missing/empty. Even if `"text"` is initially
 /// empty, the H.264 pipeline engages from the start so text can be added or updated live at any time.
+///
+/// Which overlay a video sink gets:
+/// - the main display: the main overlay file (`overlay_text_path`),
+/// - another display (cluster, auxiliary) whose own overlay file ([`display_overlay_path`], e.g.
+///   `overlay_cluster-1.json`) exists at this point: that file,
+/// - another display without its own file: the main overlay file when `only_main_display` is
+///   `false` in it, otherwise no overlay.
+///
+/// `injected_display_ids` maps the channels of injected displays to their Display Injection
+/// profile id, used as the overlay id of these displays.
 pub fn register_video_channels_from_sdr(
     sdr: &mut ServiceDiscoveryResponse,
     enabled: bool,
@@ -1091,23 +1381,44 @@ pub fn register_video_channels_from_sdr(
     hw_accel: crate::config::OverlayHwAccel,
     v4l2_decoder: &str,
     v4l2_encoder: &str,
+    injected_display_ids: &HashMap<u8, String>,
 ) {
     SESSION_ENABLED.store(enabled, Ordering::Release);
     if let Ok(mut lock) = SESSION_HW_ACCEL.lock() {
         *lock = hw_accel;
     }
-    if enabled && hw_accel != crate::config::OverlayHwAccel::None {
-        let probed =
-            crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder));
+    use crate::config::OverlayHwAccel;
+    let mut cvi_found = false;
+    if enabled && hw_accel != OverlayHwAccel::None {
+        // V4L2 M2M (Raspberry Pi & co): `auto` and `v4l2`
+        let probed = if matches!(hw_accel, OverlayHwAccel::Auto | OverlayHwAccel::V4l2) {
+            crate::v4l2_m2m::probe_v4l2_codec_devices(Some(v4l2_decoder), Some(v4l2_encoder))
+        } else {
+            None
+        };
         if let Some(devs) = &probed {
             info!(
                 "overlay: V4L2 M2M hardware acceleration enabled (decoder: {}, encoder: {})",
                 devs.decoder_path.display(),
                 devs.encoder_path.display()
             );
-        } else {
+        }
+        // Sophgo CVI codec (Milk-V Duo S): `cvi`, or `auto` when no V4L2 codec was found
+        if hw_accel == OverlayHwAccel::Cvi || (hw_accel == OverlayHwAccel::Auto && probed.is_none())
+        {
+            if crate::cvi_codec::probe() {
+                cvi_found = true;
+                info!("overlay: Sophgo CVI hardware acceleration enabled");
+            } else if hw_accel == OverlayHwAccel::Cvi {
+                warn!(
+                    "overlay: overlay_hw_accel = \"cvi\" but the CVI codec is not available \
+                     (built without the `cvi` feature, or /dev/cvi_vc_enc0 and /dev/cvi_vc_dec0 missing)"
+                );
+            }
+        }
+        if probed.is_none() && !cvi_found {
             info!(
-                "overlay: V4L2 M2M hardware codecs not found or not accessible, using pure-Rust software pipeline"
+                "overlay: hardware codecs not found or not accessible, using pure-Rust software pipeline"
             );
         }
         if let Ok(mut lock) = SESSION_V4L2_DEVICES.lock() {
@@ -1118,6 +1429,7 @@ pub fn register_video_channels_from_sdr(
             *lock = None;
         }
     }
+    SESSION_CVI_ENABLED.store(cvi_found, Ordering::Release);
 
     if !enabled {
         set_overlay_font_path(Path::new(""));
@@ -1131,6 +1443,9 @@ pub fn register_video_channels_from_sdr(
             g.clear();
             d.clear();
             e.clear();
+        }
+        if let Ok(mut sources) = DISPLAY_SOURCES.lock() {
+            sources.clear();
         }
         return;
     }
@@ -1155,6 +1470,7 @@ pub fn register_video_channels_from_sdr(
     gates.clear();
     decoders.clear();
     encoders.clear();
+    let mut sources = HashMap::new();
 
     for svc in &mut sdr.services {
         let Ok(ch) = u8::try_from(svc.id()) else {
@@ -1169,15 +1485,31 @@ pub fn register_video_channels_from_sdr(
             continue;
         }
         let display_type = sink.display_type();
-        if cfg.only_main_display && display_type != DisplayType::DISPLAY_TYPE_MAIN {
-            debug!(
-                "overlay: skipping non-main video channel {:#04x} ({:?})",
-                ch, display_type
-            );
-            continue;
-        }
+        // A display with its own overlay file uses it; otherwise the main overlay (always on the
+        // main display, on the other displays only with `only_main_display = false`).
+        let own_path =
+            display_overlay_id(ch, display_type, sink.display_id(), injected_display_ids)
+                .and_then(|id| display_overlay_path(&resolved_path, &id))
+                .filter(|path| path.is_file());
+        let own_source = own_path.as_ref().map(|path| {
+            Arc::new(DisplayOverlaySource {
+                text: Mutex::new(CachedOverlayText::new(path.clone())),
+                font: Mutex::new(CachedOverlayFont::new(trimmed_path(overlay_font_path))),
+            })
+        });
+        let sink_cfg = match &own_source {
+            Some(source) => load_overlay_config_and_lines(&source.text, &source.font).0,
+            None if cfg.only_main_display && display_type != DisplayType::DISPLAY_TYPE_MAIN => {
+                debug!(
+                    "overlay: skipping non-main video channel {:#04x} ({:?})",
+                    ch, display_type
+                );
+                continue;
+            }
+            None => cfg.clone(),
+        };
 
-        if cfg.cap_video_fps_to_30 {
+        if sink_cfg.cap_video_fps_to_30 {
             let mut capped_count = 0usize;
             for vc in &mut sink.video_configs {
                 if vc.frame_rate() == VideoFrameRateType::VIDEO_FPS_60 {
@@ -1197,8 +1529,11 @@ pub fn register_video_channels_from_sdr(
             "overlay: registered video channel {:#04x} ({:?}) for text overlay from {}",
             ch,
             display_type,
-            resolved_path.display()
+            own_path.as_deref().unwrap_or(&resolved_path).display()
         );
+        if let Some(source) = own_source {
+            sources.insert(ch, source);
+        }
         gates.insert(
             ch,
             ChannelGateState {
@@ -1208,6 +1543,9 @@ pub fn register_video_channels_from_sdr(
         );
         decoders.insert(ch, ChannelDecoderState::new(ch));
         encoders.insert(ch, ChannelEncoderState::new(display_type));
+    }
+    if let Ok(mut map) = DISPLAY_SOURCES.lock() {
+        *map = sources;
     }
 }
 
@@ -1293,6 +1631,9 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
                 DecoderBackend::V4l2(v4l2_dec) => {
                     let _ = v4l2_dec.decode(annex_b);
                 }
+                DecoderBackend::Cvi(cvi_dec) => {
+                    let _ = cvi_dec.decode(annex_b);
+                }
                 DecoderBackend::Software(sw_dec) => {
                     if let Err(e) = sw_dec.decode(annex_b) {
                         warn!(
@@ -1309,7 +1650,7 @@ fn observe_codec_config_decoder_only(channel: u8, annex_b: &[u8]) {
 }
 
 fn observe_codec_config_encoder_only(channel: u8, parsed_dims: Option<(usize, usize)>) {
-    let (cfg, _) = get_cached_overlay_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines_for_channel(channel);
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             state.reset_encoder();
@@ -1339,9 +1680,29 @@ pub fn observe_codec_config(channel: u8, frame_data: &[u8]) {
 
 /// Polls the configured `overlay_text_path` at most once every `poll_interval_ms` and returns `(config, lines)`.
 pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
+    load_overlay_config_and_lines(&OVERLAY_TEXT_CACHE, &OVERLAY_FONT_CACHE)
+}
+
+/// `(config, lines)` of the overlay drawn on `channel`: its own `overlay_<id>.json`, or the main
+/// overlay file.
+pub fn get_cached_overlay_config_and_lines_for_channel(
+    channel: u8,
+) -> (OverlayConfig, Vec<String>) {
+    match display_source(channel) {
+        Some(source) => load_overlay_config_and_lines(&source.text, &source.font),
+        None => get_cached_overlay_config_and_lines(),
+    }
+}
+
+/// Polls the overlay file of `text_cache` at most once every `poll_interval_ms` and returns
+/// `(config, lines)`. Its `"font_path"` is passed on to `font_cache`.
+fn load_overlay_config_and_lines(
+    text_cache: &Mutex<CachedOverlayText>,
+    font_cache: &Mutex<CachedOverlayFont>,
+) -> (OverlayConfig, Vec<String>) {
     let now = Instant::now();
 
-    let mut cache = match OVERLAY_TEXT_CACHE.lock() {
+    let mut cache = match text_cache.lock() {
         Ok(guard) => guard,
         Err(_) => return (OverlayConfig::default(), Vec::new()),
     };
@@ -1371,7 +1732,9 @@ pub fn get_cached_overlay_config_and_lines() -> (OverlayConfig, Vec<String>) {
                 cache.lines.clear();
             }
         }
-        set_overlay_json_font_path(&cache.config.font_path);
+        if let Ok(mut font) = font_cache.lock() {
+            font.set_json_path(trimmed_path(Path::new(&cache.config.font_path)));
+        }
     }
 
     (cache.config.clone(), cache.lines.clone())
@@ -1639,7 +2002,7 @@ pub fn process_video_media_message(channel: u8, frame_data: Vec<u8>) -> (Vec<Vec
         return (vec![frame_data], false);
     }
 
-    let (cfg, lines) = get_cached_overlay_config_and_lines();
+    let (cfg, lines) = get_cached_overlay_config_and_lines_for_channel(channel);
     process_video_data_frame_with_config(channel, frame_data, &lines, &cfg)
 }
 
@@ -1649,7 +2012,7 @@ pub fn process_video_codec_config_in_place(
     channel: u8,
     frame_data: Vec<u8>,
 ) -> (Vec<Vec<u8>>, bool) {
-    let (cfg, _) = get_cached_overlay_config_and_lines();
+    let (cfg, _) = get_cached_overlay_config_and_lines_for_channel(channel);
     if let Ok(mut map) = VIDEO_ENCODERS.lock() {
         if let Some(state) = map.get_mut(&channel) {
             if let Some(sps_pps) = state.get_sps_pps(cfg.h264_encoder_qp) {
@@ -1675,35 +2038,50 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
     let state = map.get_mut(&channel)?;
 
     let t_start = Instant::now();
-    let decoded = match &mut state.backend {
-        DecoderBackend::V4l2(v4l2_dec) => match v4l2_dec.decode(h264_au) {
-            Ok(Some(yuv)) => yuv,
-            Ok(None) => return None,
-            Err(e) => {
-                warn!(
-                    "overlay: ch {:#04x} V4L2 decode error: {:?}, falling back to pure-Rust software decoder",
-                    channel, e
-                );
-                let mut sw_dec = Decoder::new();
-                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
-                    let _ = sw_dec.decode(&cfg_bytes);
-                }
-                let fallback_res = match sw_dec.decode(h264_au) {
-                    Ok(Some(yuv)) => Some(yuv),
-                    _ => None,
-                };
-                state.backend = DecoderBackend::Software(sw_dec);
-                fallback_res?
+    // Hardware backends (V4L2 M2M, Sophgo CVI) share the same error handling: on a hard error
+    // the channel switches to the pure-Rust software decoder.
+    let hw_result: Option<std::io::Result<Option<YuvFrame>>> = match &mut state.backend {
+        DecoderBackend::V4l2(v4l2_dec) => Some(v4l2_dec.decode(h264_au)),
+        DecoderBackend::Cvi(cvi_dec) => Some(cvi_dec.decode(h264_au)),
+        DecoderBackend::Software(_) => None,
+    };
+    let decoded = match hw_result {
+        Some(Ok(Some(yuv))) => yuv,
+        Some(Ok(None)) => return None,
+        Some(Err(e)) => {
+            warn!(
+                "overlay: ch {:#04x} hardware decode error: {:?}, falling back to pure-Rust software decoder",
+                channel, e
+            );
+            let mut sw_dec = Decoder::new();
+            if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                let _ = sw_dec.decode(&cfg_bytes);
             }
-        },
-        DecoderBackend::Software(sw_dec) => match sw_dec.decode(h264_au) {
-            Ok(Some(yuv)) => yuv,
-            Ok(None) => return None,
-            Err(e) => {
-                if let Some(cfg_bytes) = state.phone_codec_config.clone() {
-                    let _ = sw_dec.decode(&cfg_bytes);
-                    if let Ok(Some(yuv)) = sw_dec.decode(h264_au) {
-                        yuv
+            let fallback_res = match sw_dec.decode(h264_au) {
+                Ok(Some(yuv)) => Some(yuv),
+                _ => None,
+            };
+            state.backend = DecoderBackend::Software(sw_dec);
+            fallback_res?
+        }
+        None => match &mut state.backend {
+            DecoderBackend::Software(sw_dec) => match sw_dec.decode(h264_au) {
+                Ok(Some(yuv)) => yuv,
+                Ok(None) => return None,
+                Err(e) => {
+                    if let Some(cfg_bytes) = state.phone_codec_config.clone() {
+                        let _ = sw_dec.decode(&cfg_bytes);
+                        if let Ok(Some(yuv)) = sw_dec.decode(h264_au) {
+                            yuv
+                        } else {
+                            debug!(
+                                "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
+                                channel,
+                                h264_au.len(),
+                                e
+                            );
+                            return None;
+                        }
                     } else {
                         debug!(
                             "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
@@ -1713,16 +2091,9 @@ fn decode_video_access_unit(channel: u8, h264_au: &[u8]) -> Option<(YuvFrame, Du
                         );
                         return None;
                     }
-                } else {
-                    debug!(
-                        "overlay: ch {:#04x} H.264 decode error ({} bytes): {:?}",
-                        channel,
-                        h264_au.len(),
-                        e
-                    );
-                    return None;
                 }
-            }
+            },
+            _ => return None,
         },
     };
     let dec_dur = t_start.elapsed();
@@ -1773,19 +2144,22 @@ fn encode_decoded_video_frame(
     let overlay_changed = state.last_encoded_lines.as_slice() != lines
         || state.last_encoded_cfg.as_ref() != Some(cfg);
 
-    let is_v4l2 = matches!(state.encoder, Some(EncoderBackend::V4l2(_)));
+    let is_hw = matches!(
+        state.encoder,
+        Some(EncoderBackend::V4l2(_)) | Some(EncoderBackend::Cvi(_))
+    );
 
     let t_draw_start = Instant::now();
-    // For V4L2 hardware encoder, NEVER use fast_skip!
-    // The hardware encoder encodes in ~2ms on the VPU and MUST receive every frame
+    // For a hardware encoder (V4L2 M2M, CVI), NEVER use fast_skip!
+    // The hardware encoder encodes in a few ms on the VPU and MUST receive every frame
     // so its internal reference picture stays 100% in sync with the car Head Unit.
-    let (draw_dur, fast_skip) = if is_v4l2 {
-        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
+    let (draw_dur, fast_skip) = if is_hw {
+        draw_overlay_for_channel(channel, &mut yuv, lines, cfg);
         (t_draw_start.elapsed(), false)
     } else if !need_keyframe && !overlay_changed && has_newer_frame_in_queue {
         (Duration::ZERO, true)
     } else {
-        draw_overlay_box_yuv420_with_config(&mut yuv, lines, cfg);
+        draw_overlay_for_channel(channel, &mut yuv, lines, cfg);
         let d_dur = t_draw_start.elapsed();
         let unchanged = !need_keyframe
             && !overlay_changed
@@ -1808,74 +2182,88 @@ fn encode_decoded_video_frame(
         skip_au
     } else {
         let mut fell_back_to_sw = None;
-        let (raw_encoded_au, emitted_by_v4l2) = match state
-            .encoder
-            .as_mut()
-            .expect("encoder initialized above")
-        {
-            EncoderBackend::V4l2(v4l2_enc) => {
-                if need_keyframe {
-                    v4l2_enc.request_keyframe();
-                    state.force_next_keyframe = false;
+        // Hardware backends (V4L2 M2M, Sophgo CVI) are driven the same way; the software
+        // encoder is handled below.
+        let hw_encode_result: Option<std::io::Result<Vec<u8>>> =
+            match state.encoder.as_mut().expect("encoder initialized above") {
+                EncoderBackend::V4l2(v4l2_enc) => {
+                    if need_keyframe {
+                        v4l2_enc.request_keyframe();
+                        state.force_next_keyframe = false;
+                    }
+                    Some(v4l2_enc.encode(&yuv))
                 }
-                match v4l2_enc.encode(&yuv) {
-                    Ok(bytes) if !bytes.is_empty() => {
-                        state.hw_enc_timeouts = 0;
-                        (bytes, true)
+                EncoderBackend::Cvi(cvi_enc) => {
+                    if need_keyframe {
+                        cvi_enc.request_keyframe();
+                        state.force_next_keyframe = false;
                     }
-                    Ok(_) => return (Vec::new(), false),
-                    Err(e)
-                        if e.kind() == std::io::ErrorKind::TimedOut
-                            && state.hw_enc_timeouts + 1 < V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS =>
-                    {
-                        // A single slow hardware frame is not a reason to give up on the
-                        // hardware encoder: drop this frame and keep going.
-                        state.hw_enc_timeouts += 1;
-                        debug!(
-                            "overlay: ch {:#04x} V4L2 encode timeout ({}/{})",
-                            channel, state.hw_enc_timeouts, V4L2_ENC_MAX_CONSECUTIVE_TIMEOUTS
-                        );
-                        return (Vec::new(), false);
-                    }
-                    Err(e) => {
-                        warn!(
-                            "overlay: ch {:#04x} V4L2 encode error: {:?}, falling back to pure-Rust software encoder",
-                            channel, e
-                        );
-                        let mut sw_enc = match create_baseline_encoder(
-                            frame_w,
-                            frame_h,
-                            cfg.h264_encoder_qp,
-                            cfg.h264_encoder_gop,
-                        ) {
-                            Ok(sw) => sw,
-                            Err(_) => return (Vec::new(), false),
-                        };
-                        // The car HU has so far seen the hardware stream: start the software
-                        // stream with an IDR and re-send SPS/PPS.
-                        sw_enc.request_keyframe();
-                        let res = match sw_enc.try_encode(&yuv) {
-                            Ok(b) => b,
-                            Err(_) => return (Vec::new(), false),
-                        };
-                        fell_back_to_sw = Some(sw_enc);
-                        (res, false)
-                    }
+                    Some(cvi_enc.encode(&yuv))
+                }
+                EncoderBackend::Software(_) => None,
+            };
+        let (raw_encoded_au, emitted_by_hw) = if let Some(hw_result) = hw_encode_result {
+            match hw_result {
+                Ok(bytes) if !bytes.is_empty() => {
+                    state.hw_enc_timeouts = 0;
+                    (bytes, true)
+                }
+                Ok(_) => return (Vec::new(), false),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::TimedOut
+                        && state.hw_enc_timeouts + 1 < HW_ENC_MAX_CONSECUTIVE_TIMEOUTS =>
+                {
+                    // A single slow hardware frame is not a reason to give up on the
+                    // hardware encoder: drop this frame and keep going.
+                    state.hw_enc_timeouts += 1;
+                    warn!(
+                        "overlay: ch {:#04x} hardware encode timeout ({}/{})",
+                        channel, state.hw_enc_timeouts, HW_ENC_MAX_CONSECUTIVE_TIMEOUTS
+                    );
+                    return (Vec::new(), false);
+                }
+                Err(e) => {
+                    warn!(
+                        "overlay: ch {:#04x} hardware encode error: {:?}, falling back to pure-Rust software encoder",
+                        channel, e
+                    );
+                    let mut sw_enc = match create_baseline_encoder(
+                        frame_w,
+                        frame_h,
+                        cfg.h264_encoder_qp,
+                        cfg.h264_encoder_gop,
+                    ) {
+                        Ok(sw) => sw,
+                        Err(_) => return (Vec::new(), false),
+                    };
+                    // The car HU has so far seen the hardware stream: start the software
+                    // stream with an IDR and re-send SPS/PPS.
+                    sw_enc.request_keyframe();
+                    let res = match sw_enc.try_encode(&yuv) {
+                        Ok(b) => b,
+                        Err(_) => return (Vec::new(), false),
+                    };
+                    fell_back_to_sw = Some(sw_enc);
+                    (res, false)
                 }
             }
-            EncoderBackend::Software(sw_enc) => {
-                if need_keyframe {
-                    sw_enc.request_keyframe();
-                    state.force_next_keyframe = false;
-                }
+        } else {
+            match state.encoder.as_mut().expect("encoder initialized above") {
+                EncoderBackend::Software(sw_enc) => {
+                    if need_keyframe {
+                        sw_enc.request_keyframe();
+                        state.force_next_keyframe = false;
+                    }
 
-                match sw_enc.try_encode(&yuv) {
-                    Ok(bytes) => (bytes, false),
-                    Err(e) => {
-                        warn!("overlay: ch {:#04x} H.264 encode error: {:?}", channel, e);
-                        return (vec![fallback_frame_data], false);
+                    match sw_enc.try_encode(&yuv) {
+                        Ok(bytes) => (bytes, false),
+                        Err(e) => {
+                            warn!("overlay: ch {:#04x} H.264 encode error: {:?}", channel, e);
+                            return (vec![fallback_frame_data], false);
+                        }
                     }
                 }
+                _ => return (Vec::new(), false),
             }
         };
 
@@ -1887,7 +2275,7 @@ fn encode_decoded_video_frame(
         }
 
         let emitted_idr = annex_b_contains_idr(&raw_encoded_au);
-        let patched_au = if emitted_by_v4l2 {
+        let patched_au = if emitted_by_hw {
             raw_encoded_au
         } else if emitted_idr {
             state.out_frame_num = 1;
@@ -1946,6 +2334,9 @@ fn encode_decoded_video_frame(
         let sps_pps = match &state.encoder {
             Some(EncoderBackend::V4l2(v4l2_enc)) if !v4l2_enc.header_bytes().is_empty() => {
                 v4l2_enc.header_bytes().to_vec()
+            }
+            Some(EncoderBackend::Cvi(cvi_enc)) if !cvi_enc.header_bytes().is_empty() => {
+                cvi_enc.header_bytes().to_vec()
             }
             _ => extract_sps_pps_annex_b(&encoded_au),
         };
@@ -2153,6 +2544,124 @@ fn patch_annex_b_for_car_hu(encoded_au: Vec<u8>) -> Vec<u8> {
     out
 }
 
+/// Reads an unsigned Exp-Golomb value starting at bit `*pos` of `data`.
+fn read_ue(data: &[u8], pos: &mut usize) -> Option<u32> {
+    let bit =
+        |p: usize| -> Option<u32> { data.get(p / 8).map(|b| ((b >> (7 - (p % 8))) & 1) as u32) };
+    let mut zeros = 0usize;
+    while bit(*pos)? == 0 {
+        zeros += 1;
+        *pos += 1;
+        if zeros > 31 {
+            return None;
+        }
+    }
+    *pos += 1; // the terminating '1'
+    let mut v = 0u32;
+    for _ in 0..zeros {
+        v = (v << 1) | bit(*pos)?;
+        *pos += 1;
+    }
+    Some((1u32 << zeros) - 1 + v)
+}
+
+/// `Some(true)` when the PPS NAL (without start code) selects CABAC, `Some(false)` for CAVLC.
+fn pps_uses_cabac(pps_nal: &[u8]) -> Option<bool> {
+    if pps_nal.len() < 3 {
+        return None;
+    }
+    let rbsp = rbsp_unescape(&pps_nal[1..]);
+    let mut pos = 0usize;
+    read_ue(&rbsp, &mut pos)?; // pic_parameter_set_id
+    read_ue(&rbsp, &mut pos)?; // seq_parameter_set_id
+    let byte = *rbsp.get(pos / 8)?;
+    Some((byte >> (7 - (pos % 8))) & 1 == 1)
+}
+
+/// `true` when the SPS (Baseline/Main, `poc_type` 0 or 2) is fully parsed and its
+/// `vui_parameters_present_flag` is the last bit before the RBSP stop bit and is 0, i.e. the
+/// VUI can safely be appended. Anything unusual returns `false` (the SPS is left alone).
+fn sps_without_vui(sps_nal: &[u8]) -> bool {
+    let rbsp = rbsp_unescape(&sps_nal[1..]);
+    let Some(&last) = rbsp.last() else {
+        return false;
+    };
+    if last == 0 || rbsp.len() < 5 || !matches!(rbsp[0], 66 | 77) {
+        return false;
+    }
+    let total_bits = rbsp.len() * 8 - 1 - last.trailing_zeros() as usize;
+    let mut pos = 24usize; // profile_idc, constraint flags, level_idc
+    let bit = |p: usize| (rbsp[p / 8] >> (7 - (p % 8))) & 1;
+    let mut ue = |pos: &mut usize| read_ue(&rbsp, pos);
+    let ok = (|| -> Option<bool> {
+        ue(&mut pos)?; // sps_id
+        ue(&mut pos)?; // log2_max_frame_num_minus4
+        match ue(&mut pos)? {
+            0 => {
+                ue(&mut pos)?; // log2_max_pic_order_cnt_lsb_minus4
+            }
+            2 => {}
+            _ => return None,
+        }
+        ue(&mut pos)?; // max_num_ref_frames
+        pos += 1; // gaps_in_frame_num_value_allowed_flag
+        ue(&mut pos)?; // width
+        ue(&mut pos)?; // height
+        if pos >= total_bits {
+            return None;
+        }
+        let frame_mbs_only = bit(pos) == 1;
+        pos += 1;
+        if !frame_mbs_only {
+            pos += 1; // mb_adaptive_frame_field_flag
+        }
+        pos += 1; // direct_8x8_inference_flag
+        if pos >= total_bits {
+            return None;
+        }
+        let crop = bit(pos) == 1;
+        pos += 1;
+        if crop {
+            for _ in 0..4 {
+                ue(&mut pos)?;
+            }
+        }
+        Some(pos + 1 == total_bits && pos < total_bits && bit(pos) == 0)
+    })();
+    ok.unwrap_or(false)
+}
+
+/// Makes the output of a hardware encoder (Sophgo CVI) acceptable to a strict car head unit,
+/// the same way [`patch_annex_b_for_car_hu`] does for the software encoder:
+/// the SPS gets the zero-latency VUI (`max_num_reorder_frames = 0`, `max_dec_frame_buffering = 1`;
+/// without it the HU decoder holds frames back for DPB reordering and the AA video flow
+/// control stalls) and the Constrained Baseline flags. When the stream is CAVLC (no CABAC)
+/// the SPS is also relabelled from Main/High to Baseline (`profile_idc = 66`); a CABAC
+/// stream is never relabelled because it is not a valid Baseline stream.
+pub(crate) fn patch_hw_annex_b_for_car_hu(au: &[u8]) -> Vec<u8> {
+    let nals: Vec<&[u8]> = split_annex_b_nals(au);
+    let cavlc = nals
+        .iter()
+        .find(|n| n.first().map(|&b| b & 0x1F) == Some(8))
+        .and_then(|n| pps_uses_cabac(n))
+        .map(|cabac| !cabac)
+        .unwrap_or(false);
+    let mut out = Vec::with_capacity(au.len() + 16);
+    for nal in nals {
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
+        if nal.first().map(|&b| b & 0x1F) == Some(7) && nal.len() > 4 && sps_without_vui(nal) {
+            let mut sps = nal.to_vec();
+            if cavlc && matches!(sps[1], 77 | 100) {
+                sps[1] = 66;
+            }
+            out.extend_from_slice(&patch_sps_nal_for_car_hu(&sps));
+        } else {
+            out.extend_from_slice(nal);
+        }
+    }
+    out
+}
+
 /// Patches an H.264 SPS NAL unit (`0x67 ...`) generated by `rusty_h264` so that:
 /// 1. `constraint_set0_flag = 1` and `constraint_set1_flag = 1` (`0xC0`, strict Constrained Baseline).
 /// 2. `vui_parameters_present_flag = 1` with `bitstream_restriction_flag = 1`,
@@ -2308,7 +2817,7 @@ fn write_zero_latency_vui(w: &mut SimpleBitWriter) {
 }
 
 /// Parses displayed `(width, height)` from the first SPS (`nal_unit_type == 7`) in an Annex-B buffer.
-fn parse_sps_dimensions_annex_b(annex_b: &[u8]) -> Option<(usize, usize)> {
+pub(crate) fn parse_sps_dimensions_annex_b(annex_b: &[u8]) -> Option<(usize, usize)> {
     for nal in split_annex_b_nals(annex_b) {
         if nal.first().map(|&b| b & 0x1F) == Some(7) && nal.len() > 4 {
             let rbsp = rbsp_unescape(&nal[1..]);
@@ -3090,6 +3599,17 @@ pub fn draw_overlay_box_yuv420_with_config(
     draw_overlay_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
 }
 
+/// Draws the overlay of `channel` with the TTF font of that channel's overlay file.
+fn draw_overlay_for_channel(
+    channel: u8,
+    frame: &mut YuvFrame,
+    lines: &[String],
+    cfg: &OverlayConfig,
+) {
+    let font = overlay_font_for_channel(channel);
+    draw_overlay_box_yuv420_with_config_and_font(frame, lines, cfg, font.as_deref());
+}
+
 /// Draws a translucent box with multi-line text on `frame` with an explicit optional TTF font.
 pub fn draw_overlay_box_yuv420_with_config_and_font(
     frame: &mut YuvFrame,
@@ -3182,11 +3702,8 @@ pub fn draw_overlay_box_yuv420_with_config_and_font(
     let box_w = (text_block_w + total_pad_x * 2).min(frame.width);
     let box_h = (text_block_h + total_pad_y * 2).min(frame.height);
 
-    // Position near bottom-right corner using configured margins
-    let box_x0 = frame.width.saturating_sub(box_w + cfg.box_margin_right_px);
-    let box_y0 = frame
-        .height
-        .saturating_sub(box_h + cfg.box_margin_bottom_px);
+    // Position according to the configured anchors and offsets (default: bottom-right)
+    let (box_x0, box_y0) = cfg.box_origin(frame.width, frame.height, box_w, box_h);
     let box_x1 = (box_x0 + box_w).min(frame.width);
     let box_y1 = (box_y0 + box_h).min(frame.height);
 
@@ -3685,6 +4202,37 @@ const FONT8X8_BASIC: [[u8; 8]; 95] = [
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn hw_header_patch_relabels_cavlc_only() {
+        let sps = [
+            0x00, 0x00, 0x00, 0x01, 0x67, 0x4D, 0x40, 0x1F, 0xA6, 0x80, 0xC8, 0x3D, 0x90,
+        ];
+        let pps_cabac = [0x00, 0x00, 0x00, 0x01, 0x68, 0xEE, 0x38, 0x80];
+        let pps_cavlc = [0x00, 0x00, 0x00, 0x01, 0x68, 0xCE, 0x38, 0x80];
+
+        let mut cabac = sps.to_vec();
+        cabac.extend_from_slice(&pps_cabac);
+        let out = patch_hw_annex_b_for_car_hu(&cabac);
+        let nals = split_annex_b_nals(&out);
+        assert_eq!(
+            nals[0][1], 0x4D,
+            "CABAC stream must not be relabelled as Baseline"
+        );
+        assert_eq!(nals[1], &pps_cabac[4..]);
+
+        let mut cavlc = sps.to_vec();
+        cavlc.extend_from_slice(&pps_cavlc);
+        let out = patch_hw_annex_b_for_car_hu(&cavlc);
+        let nals = split_annex_b_nals(&out);
+        assert_eq!(nals[0][1], 66, "CAVLC stream is relabelled Baseline");
+        assert_eq!(nals[0][2] & 0xC0, 0xC0, "constrained baseline flags");
+        assert!(nals[0].len() > sps.len() - 4, "VUI added");
+        assert_eq!(nals[1], &pps_cavlc[4..]);
+        // idempotent: a second pass must not add a second VUI
+        let again = patch_hw_annex_b_for_car_hu(&out);
+        assert_eq!(again, out);
+    }
     use super::*;
 
     #[test]
@@ -3775,6 +4323,103 @@ mod tests {
     }
 
     #[test]
+    fn test_box_origin_all_nine_anchors() {
+        let (fw, fh, bw, bh) = (800, 480, 200, 100);
+        let cfg = |h, v| OverlayConfig {
+            anchor_horizontal: h,
+            anchor_vertical: v,
+            offset_x_px: Some(30),
+            offset_y_px: Some(20),
+            ..OverlayConfig::default()
+        };
+        use HorizontalAnchor as H;
+        use VerticalAnchor as V;
+        let xs = [(H::Left, 30), (H::Center, 300), (H::Right, 570)];
+        let ys = [(V::Top, 20), (V::Center, 190), (V::Bottom, 360)];
+        for (h, x) in xs {
+            for (v, y) in ys {
+                assert_eq!(cfg(h, v).box_origin(fw, fh, bw, bh), (x, y), "{h:?} {v:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn test_box_origin_clamps_to_frame() {
+        let cfg = OverlayConfig {
+            anchor_horizontal: HorizontalAnchor::Left,
+            anchor_vertical: VerticalAnchor::Top,
+            offset_x_px: Some(10_000),
+            offset_y_px: Some(10_000),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (600, 380));
+        let cfg = OverlayConfig {
+            offset_x_px: Some(10_000),
+            offset_y_px: Some(10_000),
+            ..OverlayConfig::default()
+        };
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (0, 0));
+    }
+
+    #[test]
+    fn test_legacy_margins_still_work() {
+        // Old config without any of the new keys: bottom-right with the legacy margins
+        let (cfg, _) = parse_overlay_payload(
+            r#"{"box_margin_right_px": 40, "box_margin_bottom_px": 15, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Right);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Bottom);
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (560, 365));
+
+        // New offsets take precedence over the legacy margins
+        let (cfg, _) =
+            parse_overlay_payload(r#"{"box_margin_right_px": 40, "offset_x_px": 5, "text": "x"}"#);
+        assert_eq!(cfg.box_origin(800, 480, 200, 100), (595, 371));
+    }
+
+    #[test]
+    fn test_parse_anchor_keys() {
+        let (cfg, _) = parse_overlay_payload(
+            r#"{"anchor_horizontal": "LEFT", "ANCHOR_VERTICAL": "middle", "offset_x_px": 7, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Left);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Center);
+        assert_eq!(cfg.offset_x_px, Some(7));
+
+        // Unknown/null values fall back to defaults instead of dropping the whole payload
+        let (cfg, lines) = parse_overlay_payload(
+            r#"{"anchor_horizontal": "diagonal", "anchor_vertical": null, "text": "x"}"#,
+        );
+        assert_eq!(cfg.anchor_horizontal, HorizontalAnchor::Right);
+        assert_eq!(cfg.anchor_vertical, VerticalAnchor::Bottom);
+        assert_eq!(lines, vec!["x"]);
+    }
+
+    #[test]
+    fn test_draw_overlay_box_top_left_anchor() {
+        let (width, height) = (320, 240);
+        let mut frame = YuvFrame {
+            width,
+            height,
+            y: vec![200u8; width * height],
+            u: vec![128u8; (width / 2) * (height / 2)],
+            v: vec![128u8; (width / 2) * (height / 2)],
+        };
+        let cfg = OverlayConfig {
+            anchor_horizontal: HorizontalAnchor::Left,
+            anchor_vertical: VerticalAnchor::Top,
+            offset_x_px: Some(4),
+            offset_y_px: Some(4),
+            box_opacity_percent: 100,
+            ..OverlayConfig::default()
+        };
+        let lines = vec!["RPM: 2500".to_string()];
+        draw_overlay_box_yuv420_with_config(&mut frame, &lines, &cfg);
+        assert_ne!(frame.y[4 * width + 4], 200, "box must start at (4, 4)");
+        assert_eq!(frame.y[(height - 1) * width + width - 1], 200);
+    }
+
+    #[test]
     fn test_example_json_is_valid_and_matches_defaults() {
         let raw = include_str!("../examples/overlay.json");
         let (cfg, lines) = parse_overlay_payload(raw);
@@ -3782,9 +4427,13 @@ mod tests {
             lines,
             vec!["RPM: 2450".to_string(), "OIL: 90°C".to_string()]
         );
+        assert_eq!(cfg.effective_offset_x_px(), BOX_MARGIN_RIGHT_PX);
+        assert_eq!(cfg.effective_offset_y_px(), BOX_MARGIN_BOTTOM_PX);
         assert_eq!(
             OverlayConfig {
                 text: String::new(),
+                offset_x_px: None,
+                offset_y_px: None,
                 ..cfg
             },
             OverlayConfig::default(),
@@ -4113,6 +4762,7 @@ mod tests {
             crate::config::OverlayHwAccel::None,
             "",
             "",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert_eq!(
@@ -4609,6 +5259,7 @@ mod tests {
             crate::config::OverlayHwAccel::Auto,
             "",
             "",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x03));
@@ -4638,6 +5289,7 @@ mod tests {
             crate::config::OverlayHwAccel::V4l2,
             "/dev/nonexistent_v4l2_dec",
             "/dev/nonexistent_v4l2_enc",
+            &HashMap::new(),
         );
         assert!(overlay_enabled());
         assert!(is_registered_video_channel(0x05));
@@ -4645,5 +5297,193 @@ mod tests {
         // When invalid paths are passed, fallback to software ensures states exist and run
         assert!(VIDEO_DECODERS.lock().unwrap().contains_key(&0x05));
         assert!(VIDEO_ENCODERS.lock().unwrap().contains_key(&0x05));
+    }
+
+    fn video_sink_service(
+        ch: u8,
+        display_type: DisplayType,
+        display_id: u32,
+    ) -> crate::mitm::protos::Service {
+        use crate::mitm::protos::{MediaSinkService, Service, VideoConfiguration};
+        let mut svc = Service::new();
+        svc.set_id(i32::from(ch));
+        let mut sink = MediaSinkService::new();
+        sink.set_available_type(MediaCodecType::MEDIA_CODEC_VIDEO_H264_BP);
+        sink.set_display_type(display_type);
+        sink.set_display_id(display_id);
+        let mut vc = VideoConfiguration::new();
+        vc.set_frame_rate(VideoFrameRateType::VIDEO_FPS_60);
+        sink.video_configs.push(vc);
+        svc.media_sink_service = protobuf::MessageField::some(sink);
+        svc
+    }
+
+    fn sdr_frame_rate(sdr: &ServiceDiscoveryResponse, index: usize) -> VideoFrameRateType {
+        sdr.services[index]
+            .media_sink_service
+            .as_ref()
+            .unwrap()
+            .video_configs[0]
+            .frame_rate()
+    }
+
+    #[test]
+    fn test_display_overlay_path() {
+        let main = Path::new("/dev/shm/overlay.json");
+        assert_eq!(
+            display_overlay_path(main, "cluster-1"),
+            Some(PathBuf::from("/dev/shm/overlay_cluster-1.json"))
+        );
+        assert_eq!(
+            display_overlay_path(Path::new("  "), "auxiliary-2"),
+            Some(PathBuf::from("/dev/shm/overlay_auxiliary-2.json"))
+        );
+        assert_eq!(display_overlay_path(main, "../etc"), None);
+        assert_eq!(display_overlay_path(main, "Cluster"), None);
+        assert_eq!(display_overlay_path(main, ""), None);
+
+        let injected = HashMap::from([(0x10u8, "cluster-1".to_string())]);
+        assert_eq!(
+            display_overlay_id(0x10, DisplayType::DISPLAY_TYPE_CLUSTER, 5, &injected),
+            Some("cluster-1".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x11, DisplayType::DISPLAY_TYPE_CLUSTER, 1, &injected),
+            Some("hu-cluster-1".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x12, DisplayType::DISPLAY_TYPE_AUXILIARY, 2, &injected),
+            Some("hu-auxiliary-2".to_string())
+        );
+        assert_eq!(
+            display_overlay_id(0x13, DisplayType::DISPLAY_TYPE_MAIN, 0, &injected),
+            None
+        );
+    }
+
+    #[test]
+    fn test_per_display_overlay_files() {
+        let _guard = lock_test_state();
+        let dir =
+            std::env::temp_dir().join(format!("aa_proxy_overlay_displays_{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let main_path = dir.join("overlay.json");
+        fs::write(&main_path, r#"{"text": "MAIN"}"#).unwrap();
+        // Injected cluster with its own file (keeps 60 fps), injected aux without a file.
+        fs::write(
+            dir.join("overlay_cluster-1.json"),
+            r#"{"text": "CLUSTER", "cap_video_fps_to_30": false, "font_path": "/x/cluster.ttf"}"#,
+        )
+        .unwrap();
+
+        let (main, cluster, aux) = (0x01u8, 0x10u8, 0x11u8);
+        let injected = HashMap::from([
+            (cluster, "cluster-1".to_string()),
+            (aux, "auxiliary-1".to_string()),
+        ]);
+        let mut sdr = ServiceDiscoveryResponse::new();
+        sdr.services
+            .push(video_sink_service(main, DisplayType::DISPLAY_TYPE_MAIN, 0));
+        sdr.services.push(video_sink_service(
+            cluster,
+            DisplayType::DISPLAY_TYPE_CLUSTER,
+            1,
+        ));
+        sdr.services.push(video_sink_service(
+            aux,
+            DisplayType::DISPLAY_TYPE_AUXILIARY,
+            2,
+        ));
+
+        let register = |sdr: &mut ServiceDiscoveryResponse| {
+            register_video_channels_from_sdr(
+                sdr,
+                true,
+                &main_path,
+                Path::new("/x/config.ttf"),
+                crate::config::OverlayHwAccel::None,
+                "",
+                "",
+                &injected,
+            )
+        };
+        register(&mut sdr);
+
+        // only_main_display defaults to true: the aux display without a file gets no overlay.
+        assert!(is_registered_video_channel(main));
+        assert!(is_registered_video_channel(cluster));
+        assert!(!is_registered_video_channel(aux));
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(main).1,
+            vec!["MAIN"]
+        );
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(cluster).1,
+            vec!["CLUSTER"]
+        );
+        // Each display has its own font: the JSON font_path of the cluster file does not
+        // change the main overlay's font, which uses overlay_font_path.
+        let source = display_source(cluster).unwrap();
+        assert_eq!(
+            source.font.lock().unwrap().path,
+            PathBuf::from("/x/cluster.ttf")
+        );
+        assert_eq!(
+            OVERLAY_FONT_CACHE.lock().unwrap().path,
+            PathBuf::from("/x/config.ttf")
+        );
+        assert_eq!(sdr_frame_rate(&sdr, 0), VideoFrameRateType::VIDEO_FPS_30);
+        assert_eq!(sdr_frame_rate(&sdr, 1), VideoFrameRateType::VIDEO_FPS_60);
+        assert_eq!(sdr_frame_rate(&sdr, 2), VideoFrameRateType::VIDEO_FPS_60);
+
+        // Legacy setup: only_main_display = false puts the main overlay on every display
+        // without its own file.
+        fs::write(
+            &main_path,
+            r#"{"text": "MAIN", "only_main_display": false}"#,
+        )
+        .unwrap();
+        OVERLAY_TEXT_CACHE.lock().unwrap().last_check = None;
+        let mut sdr = ServiceDiscoveryResponse::new();
+        sdr.services
+            .push(video_sink_service(main, DisplayType::DISPLAY_TYPE_MAIN, 0));
+        sdr.services.push(video_sink_service(
+            cluster,
+            DisplayType::DISPLAY_TYPE_CLUSTER,
+            1,
+        ));
+        sdr.services.push(video_sink_service(
+            aux,
+            DisplayType::DISPLAY_TYPE_AUXILIARY,
+            2,
+        ));
+        register(&mut sdr);
+        assert!(is_registered_video_channel(aux));
+        assert!(display_source(aux).is_none());
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(aux).1,
+            vec!["MAIN"]
+        );
+        assert_eq!(
+            get_cached_overlay_config_and_lines_for_channel(cluster).1,
+            vec!["CLUSTER"]
+        );
+
+        // Disabling the overlay drops the per-display sources.
+        register_video_channels_from_sdr(
+            &mut sdr,
+            false,
+            &main_path,
+            Path::new(""),
+            crate::config::OverlayHwAccel::None,
+            "",
+            "",
+            &injected,
+        );
+        assert!(display_source(cluster).is_none());
+
+        OVERLAY_TEXT_CACHE.lock().unwrap().last_check = None;
+        set_overlay_text_path(Path::new(DEFAULT_OVERLAY_TEXT_PATH));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

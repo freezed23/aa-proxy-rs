@@ -18,6 +18,10 @@ default = ["wasm-scripting", "io-uring"]
 # With `io-uring` active, only DHU/TCP head-unit-emulator mode works;
 # main.rs refuses to start the real USB-gadget path and tells you so.
 io-uring = ["dep:tokio-uring"]
+# Hardware H.264 codec of the Sophgo SG2000/SG2002 (Milk-V Duo S) for the video overlay,
+# through the vendor cvi_mpi libraries. Needs, at build time, CVI_MPI_INC (cvi_mpi headers)
+# and CVI_MPI_LIB (libsys/libvenc/libvdec/libatomic for the target), see build.rs.
+cvi = ["dep:cc"]
 wasm-scripting = ["wasmtime", "wasmtime/component-model", "wasmtime-wasi", "notify"]
 
 [dependencies]
@@ -81,7 +85,10 @@ wasmtime-wasi = { version = "38", optional = true }
 notify = { version = "8", optional = true }
 ureq = "2"
 rust_h264 = "0.4"
-rusty_h264 = "0.16"
+# no default features: the default "global-alloc" installs rusty_alloc as the
+# process-wide allocator, which reserves a 1 GiB (fallback: 64 MiB) committed
+# arena on the first allocation and aborts on low-RAM boards (e.g. RV1103 aaw2b)
+rusty_h264 = { version = "0.16", default-features = false, features = ["std", "asm"] }
 png = "0.17"
 wpactrl = "0.5.1"
 fontdue = "0.9.4"
@@ -90,6 +97,7 @@ fontdue = "0.9.4"
 tokio-uring = { git = "https://github.com/manio/tokio-uring", branch = "musl-riscv" }
 
 [build-dependencies]
+cc = { version = "1", optional = true }
 protoc-bin-vendored = "3.1.0"
 protobuf-codegen = "3.7.1"
 
