@@ -8,6 +8,19 @@
 
 - New `fix/aaw1-v12-sdr-bytes-20261101-gpt` stacks on PR #7 `e5b180f`, not main. SDR's 21 HU text fields retain opaque bytes; presentation/generated API callers adapted; Wi-Fi password log and optional raw credential-frame hex suppressed.
 - [Scope, evidence and pending gates](SDR_OPAQUE_METADATA_20261101.md): Python schema/wire checks 7/7 PASS; native Rust tests prepared but unrun. IMPLEMENTED / UNBUILT / REAL-HU RETEST PENDING. No device/settings change or build/CI. Existing #7 flicker remains separate. Build only after an explicit owner request against the exact repair SHA.
+## 2026-10-31 #5 USB FunctionFS 주의사항 — 과거 v1.1 상태를 현재 상태로 사용 금지
+
+- 이전 [AA docs PR #5](https://github.com/freezed23/aa-proxy-rs/pull/5)에서 지적한 **v1.2 FunctionFS 기반 USB 가젯과 v1.1 rootfs의 구형 `S92usb_gadget`/`umtprd` 시작 경로 충돌 가능성**은 정적 설계상 유효한 **바이너리만 교체할 때의 주의사항**이다. 기존 v1.1 rootfs의 가젯 점유 여부를 확인하지 않고 v1.2 실행 파일만 덮어쓰지 않는다.
+- **현재 사용자 상태가 다르다:** 소유자는 장치 v1.2로 복구 후 Windows DHU / AA TBT 수신 및 protobuf 로그 추출을 다시 확인했다. 따라서 #5의 '현재 기기 실행 파일 = v1.1/fc461e8', 'v1.2 기기 실행 증거 없음', '1.2 이미지 설치 예정'이라는 문장은 **10/30 당시 체크포인트로만 해석**한다. 현 장치의 실제 `/usr/bin/aa-proxy-rs` SHA는 별도로 비교하지 않았으며, fork draft #7의 IDR 코드를 실제 설치된 것으로 주장할 수 없다.
+- KHUD/Hub [2026-10-31 PR 정리 기록](https://github.com/freezed23/ai-project-hub/blob/main/projects/hud-navigation/PR_RECONCILIATION_20261031.md)에 따라 원본 #5는 직접 병합 대신 수정된 사실만 이 문서에서 보존하고 **INTEGRATED/SUPERSEDED** 분류한다. 본 문서 PR은 **docs only**, 바이너리/이미지/USB 시작 스크립트 수정·빌드·플래시·재부팅 없음.
+
+
+> **OWNER CORRECTION (2026-10-31):** **과거에는 TMAP 내장 모의주행** 중 클러스터 TBT가 기대대로 표시되지 않았고, **현재는 Android Mock Location으로 GPS를 이동시키는 별도 시험을 진행 중**. 일반 경로 안내 시작 때 관측된 `0x8006/0x8007`과 Mock Location 주행 도중 연속 갱신 여부(아직 로그 미제공)를 구분한다.
+## 2026-10-31 Windows DHU NAVIGATIONSTATUS 벤치 성공 — 기존 빌드/런타임 상태 구분
+
+- **소유자 기존 AAW1 CS317 + Windows DHU 2.0-windows + Galaxy S23**: Zadig WinUSB로 USB `18D1:2D00` 드라이버 오류를 정리한 후 Android Auto 메인 화면 및 Instrument Cluster 표시 확인. DHU `instrumentcluster=true`, `navcluster=true`에서 `ServiceDiscoveryResponse`에 `navigation_status_service` 등장, 이번 세션 서비스 채널 `0x06`. `0x8003` ID, `0x8006` TURN_NORMAL_RIGHT=8/"교차로", `0x8007` 128m/32s/47km/2,836s/ETA20:51 복호화 Protobuf. **OWNER_DEVICE_OBSERVED: WINDOWS_DHU_BENCH**, 다른 HU/실차/장시간/차선/안내 종료/시뮬레이션 TBT는 아직 검증되지 않음.
+- 재현·원본 일부 패킷·개인정보 주의: [AAW1_DHU_NAVSTATUS_BENCH_20261031.md](AAW1_DHU_NAVSTATUS_BENCH_20261031.md). 명시적으로 AA **소스 PR #7** `e5b180f`는 여전히 OPEN DRAFT/UNMERGED이고 owner-build `41186815239` 성공 ELF/NAS 해시는 **장치 현재 바이너리 해시와 미대조**. 이 벤치가 USB FunctionFS HUR stall 전체 해결이나 keyframe toggle의 실제 효력까지 증명하지 않는다. KHUD 제품에 추가 proxy HW 의존성 도입 아님.
+- 아래 기존 10/30 인수인계의 `원격 자동 빌드 미구현`/ `현행 v1.2 미빌드` 같은 당시 표현은 **역사적 체크포인트**이며 이 10/31 후속 섹션의 self-hosted AA 빌드 및 사용자 벤치 관측으로 보완된다. 새로운 AA/KHUD 빌드나 배포/설치 동작 없음.
 
 ## 2026-10-30 원격 AA 실행 — 구현 병합 및 환경 preflight PASS
 
